@@ -102,19 +102,3 @@ Performance was evaluated on the untouched test set using F1-score optimization.
    * **Ridge ($L_2$)** offers robust, stable predictions when working with smaller, highly correlated feature clusters.
 3. **Threshold Tuning is Crucial:** Because of the 12% survival class imbalance, shifting the optimal threshold to $\sim 0.15$ maximizes F1 performance, while dropping it to $\sim 0.10$ maximizes clinical screening safety (Recall).
 
----
-
-## 📁 Project Structure
-
-```text
-├── data/                         # (Excl. from GitHub) Raw clinical and gene expression sets
-├── src/
-│   ├── pre_processing.R          # Variable filtering, factor conversion, and cleanup
-│   ├── gene_clustering.R         # K-means execution and PAM50 validation matrix
-│   ├── simple_models.R           # Logistic regression with forward/backward stepwise selection
-│   ├── penalized_models.R        # Ridge, Lasso, and Elastic Net implementations via glmnet
-│   └── advanced_custom_lasso.R   # UniLasso, ARL, and Decorrelation Lasso routines
-├── docs/
-│   ├── EYRAUD_GOIGNARD_Report.pdf # Detailed mathematical methodology report
-│   └── Presentation_Slides.pdf    # Final project presentation slide deck
-└── README.md
