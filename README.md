@@ -1,5 +1,6 @@
 # 🧬 Breast Cancer Survival Prediction: High-Dimensional Genomic Modeling
 
+[![R Language](https://img.shields.io/badge/Language-R-278A4E?style=flat&logo=r&logoColor=white)](https://www.r-project.org/)
 [![R](https://img.shields.io/badge/R-278A4E?style=flat&logo=r&logoColor=white)](https://www.r-project.org/)
 [![Bioinformatics](https://img.shields.io/badge/Domain-Bioinformatics-blue)](https://en.wikipedia.org/wiki/Bioinformatics)
 [![Machine Learning](https://img.shields.io/badge/Field-Machine__Learning-orange)](https://en.wikipedia.org/wiki/Machine_learning)
