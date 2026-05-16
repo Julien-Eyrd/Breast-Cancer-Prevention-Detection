@@ -1,0 +1,712 @@
+---
+title: "MRR Project - Genes & Breast Cancer - Introduction"
+author: "Julien EYRAUD & Alexandre GOIGNARD"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    #toc: true
+    #toc_depth: 3
+    keep_tex: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+graphics.off()
+
+#remove code parts
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Classification of Cancer outcome using Genetic and Clinical data
+
+# Introduction
+
+This project investigates the effect of genetic and clinical variables on the survival outcome of breast cancer patients. The data contains records of more than 1000 breast cancer patients from several research institutions. Clinical data contains patient-related and tumor-related information. Additionally mRNA gene expression data is available for each patient. The gene expression data has been processed to include only the top 5000 most variable genes on the transformed scale (log2(counts + 1)).
+
+We consider that the main outcome variable of interest is **vital_status**, which is defined in clinical data.
+
+## Load data
+
+```{r cars}
+load("mrr_bio.Rdata")
+
+# genetic data: n x p matrix
+dim(GeneX) # 1231 x 5000 
+str(GeneX)
+colnames(GeneX)[1:10] # first 10 names of genes
+
+# clinical data
+dim(clinical_data) # 1231 x 24
+head(clinical_data)
+colnames(clinical_data) # variables
+
+# outcome variable
+y = clinical_data$vital_status
+table(y)
+```
+
+## Exploratory data analysis: example
+
+```{r}
+# summary statistics of first 10 genes
+apply(GeneX[,1:10],2, summary)
+
+# clinical variables: gender
+unique(clinical_data$gender) # unique values
+table(clinical_data$gender) # frequency
+```
+
+```{r}
+Y_bin = ifelse(y == "Dead", 1, 0)
+table(Y_bin)
+```
+
+```{r}
+clinical_data <- as.data.frame(clinical_data)
+GeneX <- as.data.frame(GeneX)
+
+Y_bin = ifelse(clinical_data$vital_status == "Dead", 1, 0)
+table(Y_bin)
+str(GeneX)
+```
+
+\newpage
+
+### Applying k-means with the optimal k
+
+```{r}
+GeneX_t <- as.data.frame(t(GeneX))
+GeneX_t_scaled <- as.data.frame(scale(GeneX_t))
+```
+
+```{r}
+set.seed(123)
+km_genes <- kmeans(GeneX_t_scaled, centers = 4)
+
+gene_clusters <- data.frame(
+  Gene = rownames(GeneX_t),
+  Cluster = km_genes$cluster
+)
+
+cat("Genes number in cluster 1:", sum(gene_clusters$Cluster == 1), 
+    "\nGenes number in cluster 2:", sum(gene_clusters$Cluster == 2), 
+    "\nGenes number in cluster 3:", sum(gene_clusters$Cluster == 3), 
+    "\nGenes number in cluster 4:", sum(gene_clusters$Cluster == 4))
+```
+
+```{r eval=FALSE, include=FALSE}
+# PCA for visualization
+pca <- prcomp(GeneX_t_scaled)
+
+plot_df <- data.frame(
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2],
+  Cluster = factor(km_genes$cluster)
+)
+
+library(ggplot2)
+
+ggplot(plot_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Clusters (k-means)", 
+       x = "PC1", 
+       y = "PC2")
+```
+
+```{r}
+GeneX_t <- as.data.frame(t(GeneX))
+GeneX_t$GeneCluster <- km_genes$cluster
+```
+
+## Join the GeneX and Clinical_data datasets
+
+In the original dataset, the gene expression matrix **GeneX** contains the expression levels of **5000 genes** measured for **1231 patients**.\
+Using all 5000 genes as predictors in a regression model would lead to severe problems:
+
+-   
+
+-   extremely high dimensionality
+
+-   
+
+-   multicollinearity
+
+-   
+
+-   overfitting
+
+-   
+
+-   poor model interpretability
+
+-   
+
+To address this, we applied a **dimension reduction strategy based on gene clustering**.
+
+Once each gene had been assigned to a cluster, the next step was to convert the original 5000-dimensional genetic information into a much smaller set of predictors.
+
+For each patient and for each cluster, we computed:
+
+> **the average expression of all genes belonging to that cluster**
+
+This aggregation transforms the matrix:
+
+-   
+
+-   from **1231 × 5000 genes**
+
+-   
+
+-   to **1231 × 4 cluster-level features**
+
+-   
+
+The resulting features were named **C1, C2, C3, and C4**, corresponding to gene clusters 1 to 4.
+
+Let $X \in \mathbb{R}^{n \times p}$ be the gene expression matrix, where $n$ is the number of patients and $p$ is the number of genes. Let $G_k$ denote the set of genes assigned to cluster $k$, and $|G_k|$ the number of genes in cluster $k$.
+
+For each patient $i = 1, \ldots, 5000$ and each cluster $k = 1, \ldots, 4$, the aggregated cluster-level expression value is defined as:
+
+$$
+C_{ik} = \frac{1}{|G_k|} \sum_{j \in G_k} X_{ij}.
+$$
+
+Here, $C_{ik}$ represents the mean expression of all genes in cluster $k$ for patient $i$, and $X_{ij}$ denotes the expression of gene $j$ for patient $i$.
+
+This step drastically reduces dimensionality while preserving the major expression patterns captured by the clustering.
+
+The 4 aggregated gene-cluster features (C1–C4) were then merged with the clinical dataset using patient identifiers (row names).\
+The merged dataset now contains:
+
+-   clinical predictors
+
+-   survival outcome (0/1)
+
+-   4 cluster-level genetic features
+
+This compact set of predictors is suitable for regression models (e.g., logistic regression).
+
+```{r}
+# GeneX is 1231 x 5000 (patients x genes)
+# gene_clusters is a vector length 5000 with values 1,2,3,4
+
+# Put cluster labels on columns of GeneX
+cluster_assign <- km_genes$cluster
+names(cluster_assign) <- colnames(GeneX)
+
+# Split genes by cluster
+cluster_groups <- split(names(cluster_assign), cluster_assign)
+
+# Aggregate: average expression by cluster
+GeneX_cluster_mean <- sapply(cluster_groups, function(g) {
+  rowMeans(GeneX[, g, drop = FALSE])
+})
+
+# Convert to data.frame
+GeneX_cluster_mean <- as.data.frame(GeneX_cluster_mean)
+
+colnames(GeneX_cluster_mean) <- paste0("mean_C", colnames(GeneX_cluster_mean))
+
+head(GeneX_cluster_mean)
+```
+
+```{r}
+clinical_data$patient_id <- rownames(clinical_data)
+GeneX_cluster_mean$patient_id <- rownames(GeneX_cluster_mean)
+
+df <- merge(clinical_data, GeneX_cluster_mean, by = "patient_id")
+
+head(df)
+```
+
+## Methodology : k-means + regression
+
+```{r}
+
+table(df$gender)
+
+df <- subset(df, select = -c(patient_id,primary_site, age_is_obfuscated, bcr_patient_barcode))
+
+
+```
+
+```{r}
+
+# Remove all male rows
+df <- subset(df, gender != "male")
+# Eventually remove gender column since all are female
+df <- subset(df, select=-gender)
+
+# Convert "binary" columns to 0/1
+df$had_prior_treatment <- ifelse(df$prior_treatment == "Yes", 1, 0)
+df <- subset(df, select=-prior_treatment)
+df$diagnosis_is_primary_disease <- ifelse(df$diagnosis_is_primary_disease == "TRUE", 1, 0)
+
+# Convert char columns to factor
+df$tissue_type <- factor(df$tissue_type)
+df$laterality <- factor(df$laterality)
+df$tissue_or_organ_of_origin <- factor(df$tissue_or_organ_of_origin)
+df$primary_diagnosis <- factor(df$primary_diagnosis)
+df$ajcc_pathologic_t <- factor(df$ajcc_pathologic_t)
+df$morphology <- factor(df$morphology)
+df$classification_of_tumor <- factor(df$classification_of_tumor)
+df$ethnicity <- factor(df$ethnicity)
+df$is_dead <- ifelse(df$vital_status == "Dead", 1, 0)
+df <- subset(df, select=-vital_status)
+df$follow_ups_disease_response <- factor(df$follow_ups_disease_response)
+df$race <- factor(df$race)
+
+
+# Handle separately disease_type
+df$disease_type <- sapply(df$disease_type, function(x) {
+  if (is.null(x)) return(NA)       # handle NULLs
+  paste(x, collapse = "; ")        # combine multiple strings per row
+})
+table(df$disease_type)  # works now
+
+all_same <- length(unique(df$disease_type)) == 1
+all_same
+
+# The patients have all the same disease_type ; we can remove it 
+df <- subset(df, select=-disease_type)
+
+# Handle separately sites_of_involvement
+df$sites_of_involvement <- sapply(df$sites_of_involvement, function(x) {
+  if (is.null(x)) return(NA)      # handle NULLs
+  paste(x, collapse = "; ")       # combine multiple strings per row
+})
+
+df$sites_of_involvement <- factor(df$sites_of_involvement)
+
+df <- droplevels(df)
+colnames(df)
+
+```
+
+\
+
+You want to remove the specific rows that contain factor levels with only one observation. Here's how to do that:
+
+```{r}
+# Check for factors with empty levels or other issues
+check_factor_issues <- function(data) {
+  for(var in names(data)) {
+    if(is.factor(data[[var]])) {
+      cat("Variable:", var, "\n")
+      cat("  Levels:", levels(data[[var]]), "\n")
+      cat("  Level counts:", table(data[[var]]), "\n")
+      cat("  Has empty levels:", any(table(data[[var]]) == 0), "\n")
+      cat("  ---\n")
+    }
+  }
+}
+
+check_factor_issues(df)
+```
+
+```{r}
+# Function to find rows with rare factor levels
+find_rare_level_rows <- function(data, min_observations = 2) {
+  rare_rows <- c()
+  
+  for(var in names(data)) {
+    if(is.factor(data[[var]])) {
+      level_counts <- table(data[[var]])
+      rare_levels <- names(level_counts[level_counts < min_observations])
+      
+      if(length(rare_levels) > 0) {
+        cat("Variable:", var, "- Rare levels:", rare_levels, "\n")
+        # Find rows that have these rare levels
+        rare_rows <- c(rare_rows, which(data[[var]] %in% rare_levels))
+      }
+    }
+  }
+  
+  return(unique(rare_rows))
+}
+
+# Find all rows with rare factor levels
+rare_row_indices <- find_rare_level_rows(df, min_observations = 10)
+
+# Remove these rows
+df_clean <- df[-rare_row_indices, ]
+df_clean <- droplevels(df_clean)
+
+
+cat("\n\n\n")
+# Check dimensions before and after
+cat("Original dimensions:", dim(df), "\n")
+cat("Cleaned dimensions:", dim(df_clean), "\n")
+
+
+
+check_factor_issues(df_clean)
+
+```
+
+```{r}
+df_clean <- subset(df_clean, select = -c(morphology, sites_of_involvement))
+```
+
+```{r}
+check_factor_issues(df_clean)
+```
+
+```{r}
+# Find columns with only 1 unique non-NA value
+constant_columns <- sapply(df_clean, function(x) {
+  # Get unique non-NA values
+  unique_values <- unique(na.omit(x))
+  # Return TRUE if the number of unique values is 1
+  return(length(unique_values) <= 1)
+})
+
+# Get the names of columns that are constant
+cols_to_remove_final <- names(df_clean)[constant_columns]
+
+cat("## Columns to be removed for having only one unique value:\n")
+if (length(cols_to_remove_final) > 0) {
+  print(cols_to_remove_final)
+} else {
+  cat("No constant columns found.\n")
+}
+```
+
+```{r}
+debug_contr_error <- function (dat, subset_vec = NULL) {
+  if (!is.null(subset_vec)) {
+    ## step 0
+    if (mode(subset_vec) == "logical") {
+      if (length(subset_vec) != nrow(dat)) {
+        stop("'logical' `subset_vec` provided but length does not match `nrow(dat)`")
+        }
+      subset_log_vec <- subset_vec
+      } else if (mode(subset_vec) == "numeric") {
+      ## check range
+      ran <- range(subset_vec)
+      if (ran[1] < 1 || ran[2] > nrow(dat)) {
+        stop("'numeric' `subset_vec` provided but values are out of bound")
+        } else {
+        subset_log_vec <- logical(nrow(dat))
+        subset_log_vec[as.integer(subset_vec)] <- TRUE
+        } 
+      } else {
+      stop("`subset_vec` must be either 'logical' or 'numeric'")
+      }
+    dat <- base::subset(dat, subset = subset_log_vec)
+    } else {
+    ## step 1
+    dat <- stats::na.omit(dat)
+    }
+  if (nrow(dat) == 0L) warning("no complete cases")
+  ## step 2
+  var_mode <- sapply(dat, mode)
+  if (any(var_mode %in% c("complex", "raw"))) stop("complex or raw not allowed!")
+  var_class <- sapply(dat, class)
+  if (any(var_mode[var_class == "AsIs"] %in% c("logical", "character"))) {
+    stop("matrix variables with 'AsIs' class must be 'numeric'")
+    }
+  ind1 <- which(var_mode %in% c("logical", "character"))
+  dat[ind1] <- lapply(dat[ind1], as.factor)
+  ## step 3
+  fctr <- which(sapply(dat, is.factor))
+  if (length(fctr) == 0L) warning("no factor variables to summary")
+  ind2 <- if (length(ind1) > 0L) fctr[-ind1] else fctr
+  dat[ind2] <- lapply(dat[ind2], base::droplevels.factor)
+  ## step 4
+  lev <- lapply(dat[fctr], base::levels.default)
+  nl <- lengths(lev)
+  ## return
+  list(nlevels = nl, levels = lev)
+  }
+```
+
+```{r}
+## note: this function relies on `debug_contr_error`
+debug_contr_error2 <- function (form, dat, subset_vec = NULL) {
+  ## step 0
+  if (!is.null(subset_vec)) {
+    if (mode(subset_vec) == "logical") {
+      if (length(subset_vec) != nrow(dat)) {
+        stop("'logical' `subset_vec` provided but length does not match `nrow(dat)`")
+        }
+      subset_log_vec <- subset_vec
+      } else if (mode(subset_vec) == "numeric") {
+      ## check range
+      ran <- range(subset_vec)
+      if (ran[1] < 1 || ran[2] > nrow(dat)) {
+        stop("'numeric' `subset_vec` provided but values are out of bound")
+        } else {
+        subset_log_vec <- logical(nrow(dat))
+        subset_log_vec[as.integer(subset_vec)] <- TRUE
+        } 
+      } else {
+      stop("`subset_vec` must be either 'logical' or 'numeric'")
+      }
+    dat <- base::subset(dat, subset = subset_log_vec)
+    }
+  ## step 0 and 1
+  dat_internal <- stats::lm(form, data = dat, method = "model.frame")
+  attr(dat_internal, "terms") <- NULL
+  ## rely on `debug_contr_error` for steps 2 to 4
+  c(list(mf = dat_internal), debug_contr_error(dat_internal, NULL))
+  }
+```
+
+```{r}
+diag_result <- debug_contr_error2(is_dead ~ ., dat = df)
+print(diag_result$nlevels)
+```
+
+```{r}
+df <- subset(df, select=-c(classification_of_tumor, morphology))
+```
+
+```{r}
+df <- na.omit(df) 
+full_reg <- glm(is_dead ~., data=df, family="binomial")
+```
+
+```{r}
+forward_aic <- step(full_reg, direction="forward") 
+```
+
+```{r}
+backward_aic <- step(full_reg, direction="backward")
+```
+
+```{r}
+cat("Here AIC is BIC !\n\n")
+bw_bic_reg = step(full_reg, direction="backward", k=log(nrow(df)))
+
+```
+
+```{r}
+cat("Here AIC is BIC !\n\n")
+fw_bic_reg = step(full_reg, direction="forward", k=log(nrow(df)))
+```
+
+```{r}
+st_aic_reg = step(full_reg, direction="both")
+```
+
+```{r}
+cat("Here AIC is BIC !\n\n")
+st_bic_reg = step(full_reg, direction="both", k=log(nrow(df)))
+```
+
+```{r}
+library(glmnet)
+x = model.matrix(is_dead ~ ., data=df)[, -1]
+y = df$is_dead
+```
+
+```{r}
+ridge_reg <- glmnet(x, y, alpha=0, family="binomial")
+```
+
+```{r}
+ridge_cv_model <- cv.glmnet(x, y, alpha = 0, n_folds=10, family="binomial")
+ridge_min_lambda <- ridge_cv_model$lambda.min
+ridge_1se_lambda <- ridge_cv_model$lambda.1se
+cat("Lambda that minimizes RSE : ", ridge_min_lambda, "\nLambda 1SE : ", ridge_1se_lambda)
+```
+
+```{r}
+plot(ridge_cv_model)
+```
+
+```{r}
+plot(ridge_cv_model$glmnet.fit, xvar = "lambda", label = TRUE)
+abline(v = log(ridge_min_lambda), col = "red", lty = 2)
+abline(v = log(ridge_1se_lambda), col = "blue", lty = 2)
+legend("topright",
+       legend = c("lambda.min", "lambda.1se"),
+       col = c("red", "blue"),
+       lty = 2,
+       bty = "n")
+```
+
+```{r}
+ridge_min <- glmnet(x, y, alpha = 0, lambda = ridge_min_lambda, family="binomial")
+ridge_1se <- glmnet(x, y, alpha = 0, lambda = ridge_1se_lambda, family="binomial")
+```
+
+```{r}
+get_performances <- function(cm) {
+  if (!all(dim(cm) == c(2, 2))) {
+    stop("Confusion matrix must be 2x2.")
+  }
+  
+  # Extract values (assuming [Predicted, Actual])
+  TN <- cm[1, 1]
+  FP <- cm[2, 1]
+  FN <- cm[1, 2]
+  TP <- cm[2, 2]
+  
+  # Compute metrics
+  accuracy <- (TP + TN) / sum(cm)
+  precision <- TP / (TP + FP)
+  recall <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  F <- 2 * (precision * recall) / (precision + recall)
+  
+  return(list(
+    accuracy = round(accuracy, 4),
+    precision = round(precision, 4),
+    recall = round(recall, 4),
+    specificity = round(specificity, 4),
+    F_score = round(F, 4)
+  ))
+}
+```
+
+```{r}
+lasso_reg <- glmnet(x, y, alpha = 1, family="binomial")
+```
+
+```{r}
+lasso_cv_model <- cv.glmnet(x, y, alpha = 1, n_folds=10, family="binomial")
+lasso_min_lambda <- lasso_cv_model$lambda.min
+lasso_1se_lambda <- lasso_cv_model$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min_lambda, "\nLambda 1SE : ", lasso_1se_lambda)
+```
+
+```{r}
+plot(lasso_cv_model)
+```
+
+```{r}
+lasso_min <- glmnet(x, y, alpha = 1, lambda = lasso_min_lambda, family="binomial")
+lasso_1se <- glmnet(x, y, alpha = 1, lambda = lasso_1se_lambda, family="binomial")
+```
+
+# K-Fold Cross Validation
+
+## Principe général
+
+Le jeu de données est divisé en $K$ sous-ensembles de taille à peu près égale, appelés *folds*.\
+Le modèle est ensuite entraîné et testé $K$ fois selon le processus suivant :
+
+1.  On sélectionne un des $K$ folds comme **jeu de test**.
+2.  On utilise les $K-1$ folds restants comme **jeu d’entraînement**.
+3.  On entraîne le modèle sur ces données d’entraînement, puis on évalue sa performance sur le fold de test.
+4.  On répète ces étapes pour chaque fold, de sorte que chaque observation soit utilisée exactement une fois comme test.
+
+Pour simplifier ce processus, nous codons une fonction pour générer les listes de *accuracy, precision, recall, specificity et F-score* pour les modèles que nous voulons tester *(glm / glmnet).*
+
+```{r}
+# Requires the 'caret' package for stratified splitting: install.packages("caret")
+# Requires the 'glmnet' package: install.packages("glmnet")
+library(caret) 
+library(glmnet)
+
+k_fold_cv_glmnet_stratified <- function(data, y_col, k, alpha, lambda) {
+  
+  # 1. NA Handling and Data Preparation (Crucial for consistent data)
+  # Remove rows with any NA values before splitting
+  data_clean <- na.omit(data) 
+
+  # Convert all predictors (including factors) into a design matrix
+  # The '- 1' removes the intercept column, which glmnet adds automatically.
+  y_col_index <- which(names(data_clean) == y_col)
+  
+  # Create the model matrix for predictors
+  # model.matrix handles factor/categorical variables and converts them to dummy variables
+  # The formula `~ . - 1` selects all predictors and removes the intercept.
+  x_matrix <- model.matrix(as.formula(paste("~ . - 1")), data = data_clean[, -y_col_index])
+  y_vector <- data_clean[[y_col]]
+  
+  
+  # 2. Stratified Split
+  # Ensure the outcome variable is a factor for stratification
+  y_factor <- as.factor(y_vector)
+  fold_indices <- createFolds(y_factor, k = k, list = FALSE)
+  
+  performances <- vector("list", k)
+  
+  # 3. K-Fold Loop
+  for (i in 1:k) {
+    test_indices <- which(fold_indices == i)
+    
+    # Split the prepared matrix/vector data
+    x_train <- x_matrix[-test_indices, ]
+    y_train <- y_vector[-test_indices]
+    x_test <- x_matrix[test_indices, ]
+    y_test <- y_vector[test_indices]
+    
+    # Fit the penalized model
+    model <- glmnet(x_train, y_train, alpha = alpha, lambda = lambda, family = "binomial")
+    
+    # Predict on the test set
+    preds <- predict(model, newx = x_test, type = "response", s = lambda)
+    
+    # glmnet predicts matrix output, convert to vector for comparison
+    pred_classes <- ifelse(as.vector(preds) > 0.5, 1, 0)
+    
+    # Evaluation
+    cm <- table(Predicted = pred_classes, Actual = y_test)
+    performances[[i]] <- get_performances(cm)
+  }
+  
+  return(performances)
+}
+```
+
+```{r}
+library(caret) 
+
+k_fold_cv_glm_stratified <- function(data, y_col, k, model_formula) {
+  
+  # 1. Stratified Split using the outcome variable
+  y_factor <- as.factor(data[[y_col]])
+  fold_indices <- createFolds(y_factor, k = k, list = FALSE)
+  
+  performances <- vector("list", k)
+  
+  for (i in 1:k) {
+    test_indices <- which(fold_indices == i)
+    train_data <- data[-test_indices, ]
+    test_data <- data[test_indices, ]
+    
+    # 2. Re-fit the model on the training data for the current fold
+    # Use na.omit() on training data to handle NAs consistently
+    train_data_clean <- na.omit(train_data)
+    
+    # Check if we have enough data to fit the model
+    if (nrow(train_data_clean) < length(all.vars(model_formula))) {
+      warning(paste("Fold", i, "Training data too small to fit model. Skipping."))
+      next
+    }
+    
+    model_fold <- glm(model_formula, data = train_data_clean, family = "binomial")
+    
+    # 3. Prediction on test set
+    # Note: If test_data has NAs, they will be handled by predict() 
+    # (it will return NA for those rows), but the model itself must be robust.
+    preds <- predict(model_fold, newdata = test_data, type = "response")
+    
+    # Handle NA predictions (due to NAs in test_data or missing factor levels)
+    valid_indices <- !is.na(preds)
+    
+    pred_classes <- ifelse(preds[valid_indices] > 0.5, 1, 0)
+    y_test <- test_data[[y_col]][valid_indices]
+    
+    # 4. Evaluation
+    cm <- table(Predicted = pred_classes, Actual = y_test)
+    performances[[i]] <- get_performances(cm)
+  }
+  
+  return(performances)
+}
+```
+
+```{r}
+full_performances <- k_fold_cv_glm_stratified(df, "is_dead", 10, model = full_reg)
+
+st_aic_performances <- k_fold_cv_glm_stratified(df, "is_dead", 10, model = st_aic_reg) 
+
+st_bic_performances <- k_fold_cv_glm_stratified(df, "is_dead", 10, model = st_bic_reg)
+```

@@ -1,0 +1,1876 @@
+---
+title: "MRR Project - Genes & Breast Cancer - Introduction"
+author: "Julien EYRAUD & Alexandre GOIGNARD"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    #toc: true
+    #toc_depth: 3
+    keep_tex: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+graphics.off()
+
+#remove code parts
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Classification of Cancer outcome using Genetic and Clinical data
+
+# Introduction
+
+This project investigates the effect of genetic and clinical variables on the survival outcome of breast cancer patients. The data contains records of more than 1000 breast cancer patients from several research institutions. Clinical data contains patient-related and tumor-related information. Additionally mRNA gene expression data is available for each patient. The gene expression data has been processed to include only the top 5000 most variable genes on the transformed scale (log2(counts + 1)).
+
+We consider that the main outcome variable of interest is **vital_status**, which is defined in clinical data.
+
+## Load data
+
+```{r cars}
+load("mrr_bio.Rdata")
+
+# genetic data: n x p matrix
+cat("GeneX dimensions :", dim(GeneX))
+
+# clinical data
+cat("Clinical data dimensions :", dim(clinical_data))
+
+table(clinical_data$vital_status)
+```
+
+```{r}
+clinical_data <- as.data.frame(clinical_data)
+GeneX <- as.data.frame(GeneX)
+
+table(unlist(clinical_data$primary_site))
+```
+
+\newpage
+
+# Clustering genes to reduce dimensionality
+
+## Applying k-means classification
+
+```{r}
+#GeneX_t <- as.data.frame(t(GeneX))
+#GeneX_t_scaled <- as.data.frame(scale(GeneX_t))
+GeneX_scaled <- scale(GeneX)
+```
+
+```{r}
+set.seed(123)
+km_genes <- kmeans(GeneX_scaled, centers = 5)
+
+```
+
+## Applying PAM50 classification
+
+```{r}
+require(genefu)
+require(dplyr)
+require(pheatmap)
+
+data(pam50)
+data(pam50.robust)
+
+resultat_pam50 <- molecular.subtyping(
+  sbt.model = "pam50",
+  data = GeneX,
+  annot = NULL, 
+  do.mapping = FALSE 
+)
+
+pam50_df <- as.data.frame(resultat_pam50)
+
+GeneX$subtype <- pam50_df$subtype
+
+head(GeneX$subtype)
+```
+
+## Comparing k-means and PAM50 classifications
+
+```{r}
+gene_clusters <- data.frame(
+  Gene = rownames(GeneX),
+  Cluster = km_genes$cluster,
+  subtype = pam50_df$subtype
+)
+```
+
+```{r}
+contingency_table <- table(
+  "PAM50 Subtype" = gene_clusters$subtype,
+  "k-means Cluster" = gene_clusters$Cluster 
+  
+)
+
+print(contingency_table)
+```
+
+Très bons résultats sur tous les subtypes sauf LumA et LumB : c'est normal car il s'agit de types proches ; la classfication k-means fait l'erreur.
+
+| K-means cluster | PAM50 subtype | Precision (with PAM50 as reference) |
+|-----------------|---------------|-------------------------------------|
+| 1               | Normal        | 0.8456                              |
+| 2               | LumB          | 0.6274                              |
+| 3               | LumA          | 0.4956                              |
+| 4               | Basal         | 0.9171                              |
+
+## Join the GeneX and Clinical_data datasets
+
+```{r}
+df <- clinical_data
+df$subtype <- pam50_df$subtype
+```
+
+## Cleaning the joined dataset
+
+```{r}
+# Function to clean dataset (hypothesis : the format is the same as before)
+clean_dataset <- function(df) {
+
+  # 1. Suppression des lignes masculines et de la colonne gender
+  df <- subset(df, gender != "male")
+
+  # 2. Création et encodage des variables binaires (0/1)
+  df$is_dead <- ifelse(df$vital_status == "Dead", 1, 0)
+  df$had_prior_treatment <- ifelse(df$prior_treatment == "Yes", 1, 0)
+  df$diagnosis_is_primary_disease <- ifelse(df$diagnosis_is_primary_disease == "TRUE", 1, 0)
+
+  # 3. Traitement spécifique de la colonne sites_of_involvement
+  df$sites_of_involvement <- sapply(df$sites_of_involvement, function(x) {
+    if (is.null(x)) return(NA)      # handle NULLs
+    paste(x, collapse = "; ")       # combine multiple strings per row
+  })
+
+  # 4. Conversion des colonnes en facteurs
+  cols_to_factor <- c(
+    "tissue_type",
+    "laterality",
+    "tissue_or_organ_of_origin",
+    "primary_diagnosis",
+    "ajcc_pathologic_t",
+    "morphology",
+    "classification_of_tumor",
+    "follow_ups_disease_response",
+    "race",
+    "sites_of_involvement"
+  )
+  
+  df[cols_to_factor] <- lapply(df[cols_to_factor], factor)
+  
+  # 5. Suppression des colonnes 
+  
+  cols_to_remove <- c(
+    "gender", #bc all female
+    "disease_type", #bc all patients have the same disease_type
+    "vital_status", #bc it has been replaced by is_dead
+    "prior_treatment",#bc it is now binaery had_prior_tratment
+    "patient_id", #bc we don't need it anymore (already joined datasets)
+    "age_is_obfuscated", #useless var
+    "primary_site", #bc its all Breast
+    "days_to_birth", #bc gives NA as coeffs
+    "diagnosis_is_primary_disease", #bc gives NA as coeffs
+    "classification_of_tumor", #bc gives NA as coeffs
+    "bcr_patient_barcode", #useless var
+    "ethnicity", #bc causes perfect separation
+    "age_at_diagnosis"
+  )
+
+  cols_to_keep <- setdiff(names(df), cols_to_remove)
+  
+  df <- df[, cols_to_keep]
+  
+  df <- na.omit(df)
+}
+```
+
+```{r}
+df <- clean_dataset(df)
+```
+
+```{r}
+# Function to drop unused levels in a df
+drop_unused_levels_all <- function(df) {
+  df_out <- df
+  factor_cols <- names(df_out)[sapply(df_out, is.factor)]
+  
+  for (col in factor_cols) {
+    df_out[[col]] <- droplevels(df_out[[col]])
+  }
+  
+  return(df_out)
+}
+```
+
+```{r}
+table(df$tissue_or_organ_of_origin)
+```
+
+```{r}
+pairs(df[, 1:5])
+pairs(df[, 6:10])
+pairs(df[, 11:15])
+```
+
+```{r}
+# Morphology is not useful ; 
+# Almost every tissue or organ of origin is "Breast, NOS"
+# Follow_ups_disease_response is data_leakage and too deterministic : breaks models
+df <- subset(df, select=-c(morphology, 
+                           tissue_or_organ_of_origin, 
+                           follow_ups_disease_response))
+
+# Only one observation is american indian or alaska native
+df <- df[df$race != "american indian or alaska native", ]
+
+require(forcats)
+
+df$primary_diagnosis <- fct_lump_min(df$primary_diagnosis, min=15)
+df$ajcc_pathologic_t <- fct_lump_min(df$ajcc_pathologic_t, min=20)
+df$sites_of_involvement <- fct_lump_min(df$sites_of_involvement, min=15)
+
+# keep only non-empty levels
+df <- drop_unused_levels_all(df)
+```
+
+```{r}
+# Diagnostic de la répartition de l'outcome binaire par niveaux de facteurs
+diagnose_factor_separation <- function(df, outcome_col_name = "is_dead") {
+  # Identifier les colonnes de type facteur (y compris les facteurs ordonnés)
+  factor_cols <- names(df)[sapply(df, is.factor)]
+  
+  if (length(factor_cols) == 0) {
+    cat("Aucune variable de type facteur n'a été trouvée dans le dataframe.\n")
+    return(invisible(NULL))
+  }
+  
+  cat("--- Diagnostic de Séparation par Facteur ---\n")
+  cat(paste("Outcome analysé : ", outcome_col_name, "\n\n"))
+  
+  # 2. Boucle à travers chaque colonne facteur
+  for (col_name in factor_cols) {
+    
+    # Exclure la colonne d'outcome elle-même de la boucle
+    if (col_name == outcome_col_name) {
+      next
+    }
+    
+    cat(paste("### Facteur :", col_name, "###\n"))
+    
+    # Créer la table de contingence (Outcome par niveaux de Facteur)
+    contingency_table <- table(df[[col_name]], df[[outcome_col_name]], useNA = "ifany")
+    
+    # Afficher la table
+    print(contingency_table)
+    
+    # 3. Identifier les cas de Séparation Complète
+    # Un cas de séparation complète est détecté si une ligne contient un '0' 
+    # dans une colonne et un nombre > 0 dans l'autre (i.e., tous les résultats sont du même type).
+    
+    # Détecter si un niveau n'a QUE des 0 (colonne 1 = 0 et colonne 2 > 0)
+    separation_level_0 <- rownames(contingency_table)[contingency_table[, 1] == 0 & contingency_table[, 2] > 0]
+    
+    # Détecter si un niveau n'a QUE des 1 (colonne 2 = 0 et colonne 1 > 0)
+    separation_level_1 <- rownames(contingency_table)[contingency_table[, 2] == 0 & contingency_table[, 1] > 0]
+    
+    
+    if (length(separation_level_0) > 0 || length(separation_level_1) > 0) {
+      cat("\n⚠️ ALERTE SÉPARATION COMPLÈTE (GLM NON-RÉGULARISÉ ÉCHOUERA) ⚠️\n")
+      if (length(separation_level_0) > 0) {
+        cat(paste("-> Niveaux qui prédisent 'Outcome = 1' (count=0 dans Outcome=0): ", 
+                  paste(separation_level_0, collapse = ", "), "\n"))
+      }
+      if (length(separation_level_1) > 0) {
+        cat(paste("-> Niveaux qui prédisent 'Outcome = 0' (count=0 dans Outcome=1): ", 
+                  paste(separation_level_1, collapse = ", "), "\n"))
+      }
+    }
+    
+    cat("\n---\n\n")
+  }
+  
+  return(invisible(NULL))
+}
+```
+
+```{r}
+diagnose_factor_separation(df)
+```
+
+```{r}
+require(dplyr)
+df$id <- rownames(df)
+GeneX$id <- rownames(GeneX)
+
+df.complete <- left_join(df, GeneX, by="id")
+
+df <- subset(df, select=-id)
+GeneX <- subset(GeneX, select=-id)
+```
+
+```{r}
+df.complete <- subset(df.complete, select=-c(id, subtype.x, subtype.y))
+```
+
+```{r}
+require(ggplot2)
+
+ggplot(df, aes(x = factor(is_dead))) +
+  geom_bar(fill = c("blue", "red")) +
+  labs(title = "Distribution of Vital status",
+       x = "Value",
+       y = "Count")
+```
+
+# Prediction of the survival outcome
+
+## Full regression
+
+```{r}
+full_reg <- glm(is_dead ~., data=df, family="binomial")
+summary(full_reg)
+```
+
+## Regressions avec sélection de variables
+
+```{r}
+bw_aic_reg = step(full_reg, direction="backward")
+cat("\n\nHere AIC is BIC !\n\n")
+bw_bic_reg = step(full_reg, direction="backward", k=log(nrow(df)))
+```
+
+```{r}
+fw_aic_reg <- step(full_reg, direction="forward")
+cat("\n\nHere AIC is BIC !\n\n")
+fw_bic_reg <- step(full_reg, direction="forward", k=log(nrow(df)))
+```
+
+```{r}
+st_aic_reg <- step(full_reg, direction="both")
+cat("\n\nHere AIC is BIC !\n\n")
+st_bic_reg <- step(full_reg, direction="both", k=log(nrow(df)))
+```
+
+## Régression avec pénalisation (Ridge & Lasso)
+
+```{r}
+get_performances <- function(y_true, y_probs, threshold = 0.5) {
+  
+  # Convert probabilities to classes
+  y_pred <- ifelse(y_probs >= threshold, 1, 0)
+  
+  # Confusion matrix
+  cm <- table(
+    Actual = y_true,
+    Predicted = y_pred
+  )
+  
+  # Extract values safely
+  TN <- cm["0", "0"]
+  FP <- cm["0", "1"]
+  FN <- cm["1", "0"]
+  TP <- cm["1", "1"]
+  
+  # Metrics
+  accuracy  <- (TP + TN) / sum(cm)
+  recall    <- TP / (TP + FN)
+  precision <- TP / (TP + FP)
+  F_score  <- 2 * (precision * recall) / (precision + recall)
+  
+  return(list(
+    confusion_matrix = cm,
+    accuracy = accuracy,
+    recall = recall,
+    precision = precision,
+    F_score = F_score
+  ))
+}
+```
+
+```{r}
+optimize_threshold <- function(y_true, y_prob) {
+  thresholds <- seq(0.05, 0.6, by = 0.01)
+  
+  best_F <- -Inf
+  best_t <- 0.5
+  
+  for (t in thresholds) {
+    pred <- ifelse(y_prob > t, 1, 0)
+    cm <- table(pred, y_true)
+    
+    if (all(dim(cm) == c(2,2))) {
+      TP <- cm[2,2]
+      FP <- cm[2,1]
+      FN <- cm[1,2]
+      
+      precision <- TP / (TP + FP)
+      recall    <- TP / (TP + FN)
+      F1 <- 2 * precision * recall / (precision + recall)
+      
+      if (!is.nan(F1) && F1 > best_F) {
+        best_F <- F1
+        best_t <- t
+      }
+    }
+  }
+  
+  list(best_threshold = best_t, best_F1 = best_F)
+}
+```
+
+## Simple train / test split
+
+```{r}
+require(caret)
+set.seed(123)
+
+df$is_dead <- factor(df$is_dead, levels = c(0, 1), labels = c("No", "Yes"))
+df.complete$is_dead <- factor(df.complete$is_dead, levels = c(0, 1), labels = c("No", "Yes"))
+
+train_idx <- createDataPartition(df$is_dead, p = 0.8, list = FALSE)
+train_data <- df[train_idx, ]
+test_data  <- df[-train_idx, ]
+
+train_idx.genes <- createDataPartition(df.complete$is_dead, p = 0.8, list = FALSE)
+train_data.genes <- df.complete[train_idx.genes, ]
+test_data.genes  <- df.complete[-train_idx.genes, ]
+```
+
+```{r}
+# -------------------------------
+# 1. Outcome vectors (y)
+# -------------------------------
+
+# Make sure outcome is numeric 0/1 for glmnet
+y_train <- as.numeric(train_data$is_dead == "Yes")
+y_test  <- as.numeric(test_data$is_dead  == "Yes")
+
+y_train.genes <- as.numeric(train_data.genes$is_dead == "Yes")
+y_test.genes  <- as.numeric(test_data.genes$is_dead  == "Yes")
+
+# -------------------------------
+# 2. Predictor data frames (x)
+# -------------------------------
+
+x_train <- train_data[, setdiff(names(train_data), "is_dead"), drop = FALSE]
+x_test  <- test_data[,  setdiff(names(test_data),  "is_dead"), drop = FALSE]
+
+x_train.genes <- train_data.genes[, setdiff(names(train_data.genes), "is_dead"), drop = FALSE]
+x_test.genes  <- test_data.genes[,  setdiff(names(test_data.genes),  "is_dead"), drop = FALSE]
+
+# -------------------------------
+# 3. Convert to model matrices (dummy encoding)
+# -------------------------------
+x_train_mat <- model.matrix(~ ., data = x_train)[, -1]  # remove intercept
+x_test_mat  <- model.matrix(~ ., data = x_test)[, -1]
+
+x_train_mat.genes <- model.matrix(~ ., data = x_train.genes)[, -1]
+x_test_mat.genes  <- model.matrix(~ ., data = x_test.genes)[, -1]
+# -------------------------------
+# 4. Force glmnet-compatible format
+# -------------------------------
+
+x_train_mat <- as.matrix(x_train_mat)
+x_test_mat  <- as.matrix(x_test_mat)
+
+x_train_mat.genes <- as.matrix(x_train_mat.genes)
+x_test_mat.genes <- as.matrix(x_test_mat.genes)
+
+# -------------------------------
+# 5. Safety check (this MUST be TRUE)
+# -------------------------------
+
+stopifnot(ncol(x_train_mat) == ncol(x_test_mat))
+```
+
+### Model Weights
+
+```{r}
+class_counts <- table(train_data$is_dead)
+N <- sum(class_counts)
+K <- length(class_counts)
+
+class_weights <- N / (K * class_counts)
+
+model_weights <- ifelse(train_data$is_dead == "Yes",
+                        class_weights["Yes"],
+                        class_weights["No"])
+```
+
+```{r}
+# Classic Full Model
+full <- glm(
+  is_dead ~ ., 
+  data = train_data, 
+  family = "binomial"
+)
+
+full.probs <- predict(full, newdata = test_data, type = "response")
+
+full.opt <- optimize_threshold(y_test, full.probs)
+
+full.perf <- get_performances(y_test, full.probs, full.opt)
+```
+
+```{r}
+# Full Model weighted
+full_weighted <- glm(
+  is_dead ~ ., 
+  data = train_data, 
+  family = "binomial",
+  weights = model_weights
+)
+
+full_w.probs <- predict(full_weighted, newdata = test_data, type = "response")
+
+full_w.opt <- optimize_threshold(y_test, full_w.probs)
+
+full_w.perf <- get_performances(y_test, full_w.probs, full_w.opt)
+```
+
+### Resampling : Combination
+
+```{r}
+require(caret)
+# balance the train data
+train_data.up <- upSample(train_data[,-which(names(train_data)=="is_dead")],
+                           train_data$is_dead,
+                           yname = "is_dead")
+
+table(train_data.up$is_dead)
+table(test_data$is_dead)
+
+train_data.genes.up <- upSample(train_data.genes[,-which(names(train_data.genes)=="is_dead")],
+                           train_data.genes$is_dead,
+                           yname = "is_dead")
+
+table(train_data.genes.up$is_dead)
+table(test_data.genes$is_dead)
+
+test_data.genes.up <- test_data.genes
+test_data.up <- test_data
+```
+
+```{r}
+# -------------------------------
+# 1. Outcome vectors (y)
+# -------------------------------
+
+# Make sure outcome is numeric 0/1 for glmnet
+y_train.up <- as.numeric(train_data.up$is_dead == "Yes")
+y_test  <- as.numeric(test_data$is_dead  == "Yes")
+
+y_train.genes.up <- as.numeric(train_data.genes.up$is_dead == "Yes")
+
+# -------------------------------
+# 2. Predictor data frames (x)
+# -------------------------------
+
+x_train.genes.up <- train_data.genes.up[, setdiff(names(train_data.genes.up), "is_dead"), drop = FALSE]
+x_test.genes.up <- test_data.genes.up[, setdiff(names(test_data.genes.up), "is_dead"), drop = FALSE]
+
+x_train.up <- train_data.up[, setdiff(names(train_data.up), "is_dead"), drop = FALSE]
+x_test.up <- test_data.up[, setdiff(names(test_data.up), "is_dead"), drop = FALSE]
+
+# -------------------------------
+# 3. Convert to model matrices (dummy encoding)
+# -------------------------------
+x_train_mat.genes.up <- model.matrix(~ ., data = x_train.genes.up)[, -1]
+x_test_mat.genes.up  <- model.matrix(~ ., data = x_test.genes.up)[, -1]
+
+x_train_mat.up <- model.matrix(~ ., data = x_train.up)[, -1]
+x_test_mat.up  <- model.matrix(~ ., data = x_test.up)[, -1]
+# -------------------------------
+# 4. Force glmnet-compatible format
+# -------------------------------
+
+x_train_mat.genes.up <- as.matrix(x_train_mat.genes.up)
+x_test_mat.genes.up <- as.matrix(x_test_mat.genes.up)
+
+x_train_mat.up <- as.matrix(x_train_mat.up)
+x_test_mat.up <- as.matrix(x_test_mat.up)
+```
+
+```{r}
+# Full Model with upsampling
+full_up <- glm(
+  is_dead ~ ., 
+  data = train_data.up, 
+  family = "binomial"
+)
+
+full_up.probs <- predict(full_up, newdata = test_data, type = "response")
+
+full_up.opt <- optimize_threshold(y_test, full_up.probs)
+
+full_up.perf <- get_performances(y_test, full_up.probs, full_up.opt)
+```
+
+### Simple Models
+
+```{r include=FALSE}
+full_model <- glm(
+  is_dead ~ ., 
+  data = train_data, 
+  family = "binomial"
+)
+
+full_model_probs <- predict(full_model, newdata = test_data, type = "response")
+
+# step() keeps the weights of the fuyll_model so ok
+backward_aic_model <- step(full_model, direction = "backward")
+backward_aic_probs <- predict(backward_aic_model, newdata = test_data, type = "response")
+
+backward_bic_model <- step(full_model, direction = "backward", k = log(nrow(train_data)))
+backward_bic_probs <- predict(backward_bic_model, newdata = test_data, type = "response")
+
+forward_aic_model <- step(full_model, direction = "forward")
+forward_aic_probs <- predict(forward_aic_model, newdata = test_data, type = "response")
+
+forward_bic_model <- step(full_model, direction = "forward", k = log(nrow(train_data)))
+forward_bic_probs <- predict(forward_bic_model, newdata = test_data, type = "response")
+
+stepwise_aic_model <- step(full_model, direction = "both")
+stepwise_aic_probs <- predict(stepwise_aic_model, newdata = test_data, type = "response")
+
+stepwise_bic_model <- step(full_model, direction = "both", k = log(nrow(train_data)))
+stepwise_bic_probs <- predict(stepwise_bic_model, newdata = test_data, type = "response")
+```
+
+```{r}
+
+```
+
+### Advanced Models
+
+```{r}
+class_counts.genes <- table(train_data.genes$is_dead)
+N.genes <- sum(class_counts.genes)
+K.genes <- length(class_counts.genes)
+
+class_weights.genes <- N.genes / (K.genes * class_counts.genes)
+
+model_weights.genes <- ifelse(train_data.genes$is_dead == "Yes",
+                        class_weights.genes["Yes"],
+                        class_weights.genes["No"])
+```
+
+## Ridge Regression Models (alpha=0)
+
+### BASE RIDGE - WITH CANCER SUBTYPE
+
+# RIDGE: Clinical + Subtype Data (K-clustered)
+
+```{r}
+require(glmnet)
+ridge_reg <- glmnet(x_train_mat, y_train, alpha = 0, family="binomial", standardize=TRUE)
+
+ridge_cv_model <- cv.glmnet(x_train_mat, y_train, alpha = 0, n_folds=10, family="binomial", standardize = TRUE)
+
+ridge_min.lambda <- ridge_cv_model$lambda.min
+ridge_1se.lambda <- ridge_cv_model$lambda.1se 
+cat("Lambda that minimizes RSE (Ridge K) : ", ridge_min.lambda, "\nLambda 1SE (Ridge K) : ", ridge_1se.lambda)
+```
+
+```{r}
+ridge_min <- glmnet(x_train_mat, y_train, alpha = 0, lambda = ridge_min.lambda, family="binomial",standardize = TRUE)
+ridge_1se <- glmnet(x_train_mat, y_train, alpha = 0, lambda = ridge_1se.lambda, family="binomial", standardize = TRUE)
+```
+
+```{r}
+ridge_min.probs <- predict(ridge_min, newx = x_test_mat, type = "response")
+
+ridge_min.opt_treshold <- optimize_threshold(y_test, ridge_min.probs)
+
+ridge_min.perf <- get_performances( y_true = y_test, y_probs = ridge_min.probs, threshold = ridge_min.opt_treshold$best_threshold )
+
+ridge_1se.probs <- predict(ridge_1se, newx = x_test_mat, type = "response")
+
+ridge_1se.opt_treshold <- optimize_threshold(y_test, ridge_1se.probs)
+
+ridge_1se.perf <- get_performances( y_true = y_test, y_probs = ridge_1se.probs, threshold = ridge_1se.opt_treshold$best_threshold )
+```
+
+### BASE RIDGE - WITH ALL GENES
+
+```{r}
+# RIDGE: Clinical + All Genes Data (C-complete)
+
+ridge_reg.genes <- glmnet(x_train_mat.genes, y_train.genes, alpha = 0, family="binomial", standardize=TRUE)
+
+ridge_cv_model.genes <- cv.glmnet(x_train_mat.genes, y_train.genes, alpha = 0, n_folds=10, family="binomial", standardize = TRUE)
+
+ridge_min_lambda.genes <- ridge_cv_model.genes$lambda.min
+ridge_1se_lambda.genes <- ridge_cv_model.genes$lambda.1se
+cat("Lambda that minimizes RSE (Ridge C) : ", ridge_min_lambda.genes, "\nLambda 1SE (Ridge C) : ", ridge_1se_lambda.genes)
+```
+
+```{r}
+ridge_min.genes <- glmnet(x_train_mat.genes, y_train.genes, alpha = 0, lambda = ridge_min_lambda.genes, family="binomial",standardize = TRUE)
+ridge_1se.genes <- glmnet(x_train_mat.genes, y_train.genes, alpha = 0, lambda = ridge_1se_lambda.genes, family="binomial", standardize = TRUE)
+```
+
+```{r}
+ridge_min.genes.probs <- predict(ridge_min.genes, newx = x_test_mat.genes, type = "response")
+
+ridge_min.genes.opt_treshold <- optimize_threshold(y_test.genes, ridge_min.genes.probs)
+
+ridge_min.genes.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_min.genes.probs, threshold = ridge_min.genes.opt_treshold$best_threshold )
+
+ridge_1se.genes.probs <- predict(ridge_1se.genes, newx = x_test_mat.genes, type = "response")
+
+ridge_1se.genes.opt_treshold <- optimize_threshold(y_test.genes, ridge_1se.genes.probs)
+
+ridge_1se.genes.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_1se.genes.probs, threshold = ridge_1se.genes.opt_treshold$best_threshold )
+```
+
+### RIDGE UPSAMPLED - WITH ALL GENES
+
+```{r}
+# RIDGE: Clinical + All Genes Data (C-complete) Upsampled
+
+ridge_reg.genes.up <- glmnet(x_train_mat.genes.up, y_train.genes.up, alpha = 0, family="binomial", standardize=TRUE)
+
+ridge_cv_model.genes.up <- cv.glmnet(x_train_mat.genes.up, y_train.genes.up, alpha = 0, n_folds=10, family="binomial", standardize = TRUE)
+
+ridge_min_lambda.genes.up <- ridge_cv_model.genes.up$lambda.min
+ridge_1se_lambda.genes.up <- ridge_cv_model.genes.up$lambda.1se 
+cat("Lambda that minimizes RSE (Ridge C Up) : ", ridge_min_lambda.genes.up, "\nLambda 1SE (Ridge C Up) : ", ridge_1se_lambda.genes.up)
+```
+
+```{r}
+ridge_min.genes.up <- glmnet(x_train_mat.genes.up, y_train.genes.up, alpha = 0, lambda = ridge_min_lambda.genes.up, family="binomial",standardize = TRUE) 
+ridge_1se.genes.up <- glmnet(x_train_mat.genes.up, y_train.genes.up, alpha = 0, lambda = ridge_1se_lambda.genes.up, family="binomial", standardize = TRUE)
+```
+
+```{r}
+ridge_min.genes.up.probs <- predict(ridge_min.genes.up, newx = x_test_mat.genes.up, type = "response")
+
+ridge_min.genes.up.opt_treshold <- optimize_threshold(y_test.genes, ridge_min.genes.up.probs)
+
+ridge_min.genes.up.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_min.genes.up.probs, threshold = ridge_min.genes.up.opt_treshold$best_threshold )
+
+ridge_1se.genes.up.probs <- predict(ridge_1se.genes.up, newx = x_test_mat.genes.up, type = "response")
+
+ridge_1se.genes.up.opt_treshold <- optimize_threshold(y_test.genes, ridge_1se.genes.up.probs)
+
+ridge_1se.genes.up.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_1se.genes.up.probs, threshold = ridge_1se.genes.up.opt_treshold$best_threshold )
+```
+
+### RIDGE UPSAMPLED - WITH CANCER SUBTYPE
+
+```{r}
+# RIDGE: Clinical + Subtype Data (K-clustered) Upsampled
+
+ridge_reg.up <- glmnet(x_train_mat.up, y_train.up, alpha = 0, family="binomial", standardize=TRUE)
+
+ridge_cv_model.up <- cv.glmnet(x_train_mat.up, y_train.up, alpha = 0, n_folds=10, family="binomial", standardize = TRUE)
+
+ridge_min_lambda.up <- ridge_cv_model.up$lambda.min
+ridge_1se_lambda.up <- ridge_cv_model.up$lambda.1se 
+cat("Lambda that minimizes RSE (Ridge K Up) : ", ridge_min_lambda.up, "\nLambda 1SE (Ridge K Up) : ", ridge_1se_lambda.up)
+```
+
+```{r}
+ridge_min.up <- glmnet(x_train_mat.up, y_train.up, alpha = 0, lambda = ridge_min_lambda.up, family="binomial",standardize = TRUE) 
+ridge_1se.up <- glmnet(x_train_mat.up, y_train.up, alpha = 0, lambda = ridge_1se_lambda.up, family="binomial", standardize = TRUE)
+```
+
+```{r}
+ridge_min.up.probs <- predict(ridge_min.up, newx = x_test_mat.up, type = "response")
+
+ridge_min.up.opt_treshold <- optimize_threshold(y_test.genes, ridge_min.up.probs)
+
+ridge_min.up.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_min.up.probs, threshold = ridge_min.up.opt_treshold$best_threshold )
+
+ridge_1se.up.probs <- predict(ridge_1se.up, newx = x_test_mat.up, type = "response")
+
+ridge_1se.up.opt_treshold <- optimize_threshold(y_test.genes, ridge_1se.up.probs)
+
+ridge_1se.up.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_1se.up.probs, threshold = ridge_1se.up.opt_treshold$best_threshold )
+```
+
+### BASE RIDGE WITH WEIGHTS (K-clustered)
+
+```{r}
+# RIDGE: Clinical + Subtype Data (K-clustered) Weighted
+
+ridge_reg.weighted <- glmnet(x_train_mat, y_train, alpha = 0, family="binomial", standardize=TRUE, weights = model_weights)
+
+ridge_cv_model.weighted <- cv.glmnet(x_train_mat, y_train, alpha = 0, n_folds=10, family="binomial", standardize = TRUE, weights = model_weights)
+```
+
+```{r}
+ridge_min_lambda.weighted <- ridge_cv_model.weighted$lambda.min
+ridge_1se_lambda.weighted <- ridge_cv_model.weighted$lambda.1se 
+cat("Lambda that minimizes RSE (Ridge K W) : ", ridge_min_lambda.weighted, "\nLambda 1SE (Ridge K W) : ", ridge_1se_lambda.weighted)
+
+ridge_min.weighted <- glmnet(x_train_mat, y_train, alpha = 0, lambda = ridge_min_lambda.weighted, family="binomial", standardize = TRUE, weights = model_weights)
+ridge_1se.weighted <- glmnet(x_train_mat, y_train, alpha = 0, lambda = ridge_1se_lambda.weighted, family="binomial", standardize = TRUE, weights = model_weights)
+```
+
+```{r}
+ridge_min.weighted.probs <- predict(ridge_min.weighted, newx = x_test_mat, type = "response")
+
+ridge_min.weighted.opt_treshold <- optimize_threshold(y_test, ridge_min.weighted.probs)
+
+ridge_min.weighted.perf <- get_performances( y_true = y_test, y_probs = ridge_min.weighted.probs, threshold = ridge_min.weighted.opt_treshold$best_threshold )
+
+ridge_1se.weighted.probs <- predict(ridge_1se.weighted, newx = x_test_mat, type = "response")
+
+ridge_1se.weighted.opt_treshold <- optimize_threshold(y_test, ridge_1se.weighted.probs)
+
+ridge_1se.weighted.perf <- get_performances( y_true = y_test, y_probs = ridge_1se.weighted.probs, threshold = ridge_1se.weighted.opt_treshold$best_threshold )
+```
+
+### RIDGE WITH WEIGHTS - WITH ALL GENES (C-complete)
+
+```{r}
+# RIDGE: Clinical + All Genes Data (C-complete) Weighted
+
+ridge_reg.genes.weighted <- glmnet(x_train_mat.genes, y_train.genes, alpha = 0, family="binomial", standardize=TRUE, weights = model_weights.genes)
+
+ridge_cv_model.genes.weighted <- cv.glmnet(x_train_mat.genes, y_train.genes, alpha = 0, n_folds=10, family="binomial", standardize = TRUE, weights = model_weights.genes)
+```
+
+```{r}
+ridge_min_lambda.genes.weighted <- ridge_cv_model.genes.weighted$lambda.min
+ridge_1se_lambda.genes.weighted <- ridge_cv_model.genes.weighted$lambda.1se 
+cat("Lambda that minimizes RSE (Ridge C W) : ", ridge_min_lambda.genes.weighted, "\nLambda 1SE (Ridge C W) : ", ridge_1se_lambda.genes.weighted)
+```
+
+```{r}
+ridge_min.genes.weighted <- glmnet(x_train_mat.genes, y_train.genes, alpha = 0, lambda = ridge_min_lambda.genes.weighted, family="binomial", standardize = TRUE, weights = model_weights.genes)
+ridge_1se.genes.weighted <- glmnet(x_train_mat.genes, y_train.genes, alpha = 0, lambda = ridge_1se_lambda.genes.weighted, family="binomial", standardize = TRUE, weights = model_weights.genes)
+```
+
+```{r}
+ridge_min.genes.weighted.probs <- predict(ridge_min.genes.weighted, newx = x_test_mat.genes, type = "response")
+
+ridge_min.genes.weighted.opt_treshold <- optimize_threshold(y_test.genes, ridge_min.genes.weighted.probs)
+
+ridge_min.genes.weighted.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_min.genes.weighted.probs, threshold = ridge_min.genes.weighted.opt_treshold$best_threshold )
+
+ridge_1se.genes.weighted.probs <- predict(ridge_1se.genes.weighted, newx = x_test_mat.genes, type = "response")
+
+ridge_1se.genes.weighted.opt_treshold <- optimize_threshold(y_test.genes, ridge_1se.genes.weighted.probs)
+
+ridge_1se.genes.weighted.perf <- get_performances( y_true = y_test.genes, y_probs = ridge_1se.genes.weighted.probs, threshold = ridge_1se.genes.weighted.opt_treshold$best_threshold )
+```
+
+### BASE LASSO - WITH CANCER SUBTYPE
+
+```{r}
+lasso_reg <- glmnet(x_train_mat, y_train, alpha = 1, 
+                    family="binomial", standardize=TRUE)
+
+lasso_cv_model <- cv.glmnet(x_train_mat, y_train, alpha = 1, 
+                            n_folds=10, family="binomial",
+                            standardize = TRUE)
+
+lasso_min.lambda <- lasso_cv_model$lambda.min
+lasso_1se.lambda <- lasso_cv_model$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min.lambda, "\nLambda 1SE : ", lasso_1se.lambda)
+```
+
+```{r}
+lasso_min <- glmnet(x_train_mat, y_train, alpha = 1, lambda = lasso_min.lambda, 
+                    family="binomial",standardize = TRUE)
+lasso_1se <- glmnet(x_train_mat, y_train, alpha = 1, lambda = lasso_1se.lambda, 
+                    family="binomial", standardize = TRUE)
+```
+
+```{r}
+lasso_min.probs <- predict(lasso_min, newx = x_test_mat, type = "response")
+
+lasso_min.opt_treshold <- optimize_threshold(y_test, lasso_min.probs)
+
+lasso_min.perf <- get_performances(
+  y_true  = y_test,
+  y_probs = lasso_min.probs,
+  threshold = lasso_min.opt_treshold$best_threshold
+)
+
+lasso_1se.probs <- predict(lasso_1se, newx = x_test_mat, type = "response")
+
+lasso_1se.opt_treshold <- optimize_threshold(y_test, lasso_1se.probs)
+
+lasso_1se.perf <- get_performances(
+  y_true  = y_test,
+  y_probs = lasso_1se.probs,
+  threshold = lasso_1se.opt_treshold$best_threshold
+)
+```
+
+### BASE LASSO - WITH ALL GENES
+
+```{r}
+# TRY WITH THE COMPLETE DATSET (USE GENES EXPRESSION)
+lasso_reg.genes <- glmnet(x_train_mat.genes, y_train.genes, alpha = 1, 
+                    family="binomial", standardize=TRUE)
+
+lasso_cv_model.genes <- cv.glmnet(x_train_mat.genes, y_train.genes, alpha = 1, 
+                            n_folds=10, family="binomial",
+                            standardize = TRUE)
+
+lasso_min_lambda.genes <- lasso_cv_model.genes$lambda.min
+lasso_1se_lambda.genes <- lasso_cv_model.genes$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min_lambda.genes, "\nLambda 1SE : ", lasso_1se_lambda.genes)
+```
+
+```{r}
+lasso_min.genes <- glmnet(x_train_mat.genes, y_train.genes, 
+                          alpha = 1, lambda = lasso_min_lambda.genes, 
+                          family="binomial",standardize = TRUE)
+lasso_1se.genes <- glmnet(x_train_mat.genes, y_train.genes, 
+                          alpha = 1, lambda = lasso_1se_lambda.genes, 
+                          family="binomial", standardize = TRUE)
+```
+
+```{r}
+lasso_min.genes.probs <- predict(lasso_min.genes, newx = x_test_mat.genes, type = "response")
+
+lasso_min.genes.opt_treshold <- optimize_threshold(y_test.genes, lasso_min.genes.probs)
+
+lasso_min.genes.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_min.genes.probs,
+  threshold = lasso_min.genes.opt_treshold$best_threshold
+)
+
+lasso_1se.genes.probs <- predict(lasso_1se.genes, newx = x_test_mat.genes, type = "response")
+
+lasso_1se.genes.opt_treshold <- optimize_threshold(y_test.genes, lasso_1se.genes.probs)
+
+lasso_1se.genes.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_1se.genes.probs,
+  threshold = lasso_1se.genes.opt_treshold$best_threshold
+)
+```
+
+### LASSO UPSAMPLED - WITH ALL GENES
+
+```{r}
+# TRY WITH THE COMPLETE DATASET UPSAMPLED (USE GENES EXPRESSION)
+lasso_reg.genes.up <- glmnet(x_train_mat.genes.up, y_train.genes.up, alpha = 1, 
+                    family="binomial", standardize=TRUE)
+
+lasso_cv_model.genes.up <- cv.glmnet(x_train_mat.genes.up, y_train.genes.up, alpha = 1, 
+                            n_folds=10, family="binomial",
+                            standardize = TRUE)
+
+lasso_min_lambda.genes.up <- lasso_cv_model.genes.up$lambda.min
+lasso_1se_lambda.genes.up <- lasso_cv_model.genes.up$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min_lambda.genes.up, "\nLambda 1SE : ", lasso_1se_lambda.genes.up)
+```
+
+```{r}
+lasso_min.genes.up <- glmnet(x_train_mat.genes.up, y_train.genes.up, 
+                          alpha = 1, lambda = lasso_min_lambda.genes.up, 
+                          family="binomial",standardize = TRUE)
+lasso_1se.genes.up <- glmnet(x_train_mat.genes.up, y_train.genes.up, 
+                          alpha = 1, lambda = lasso_1se_lambda.genes.up, 
+                          family="binomial", standardize = TRUE)
+```
+
+```{r}
+lasso_min.genes.up.probs <- predict(lasso_min.genes.up, newx = x_test_mat.genes.up, type = "response")
+
+lasso_min.genes.up.opt_treshold <- optimize_threshold(y_test.genes, lasso_min.genes.up.probs)
+
+lasso_min.genes.up.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_min.genes.up.probs,
+  threshold = lasso_min.genes.up.opt_treshold$best_threshold
+)
+
+lasso_1se.genes.up.probs <- predict(lasso_1se.genes.up, newx = x_test_mat.genes.up, type = "response")
+
+lasso_1se.genes.up.opt_treshold <- optimize_threshold(y_test.genes, lasso_1se.genes.up.probs)
+
+lasso_1se.genes.up.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_1se.genes.up.probs,
+  threshold = lasso_1se.genes.up.opt_treshold$best_threshold
+)
+```
+
+### LASSO UPSAMPLED - WITH CANCER SUBTYPE
+
+```{r}
+# TRY WITH THE KMEANS DATASET UPSAMPLED
+lasso_reg.up <- glmnet(x_train_mat.up, y_train.up, alpha = 1, 
+                    family="binomial", standardize=TRUE)
+
+lasso_cv_model.up <- cv.glmnet(x_train_mat.up, y_train.up, alpha = 1, 
+                            n_folds=10, family="binomial",
+                            standardize = TRUE)
+
+lasso_min_lambda.up <- lasso_cv_model.up$lambda.min
+lasso_1se_lambda.up <- lasso_cv_model.up$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min_lambda.up, "\nLambda 1SE : ", lasso_1se_lambda.up)
+```
+
+```{r}
+lasso_min.up <- glmnet(x_train_mat.up, y_train.up, 
+                          alpha = 1, lambda = lasso_min_lambda.up, 
+                          family="binomial",standardize = TRUE)
+lasso_1se.up <- glmnet(x_train_mat.up, y_train.up, 
+                          alpha = 1, lambda = lasso_1se_lambda.up, 
+                          family="binomial", standardize = TRUE)
+```
+
+```{r}
+lasso_min.up.probs <- predict(lasso_min.up, newx = x_test_mat.up, type = "response")
+
+lasso_min.up.opt_treshold <- optimize_threshold(y_test.genes, lasso_min.up.probs)
+
+lasso_min.up.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_min.up.probs,
+  threshold = lasso_min.up.opt_treshold$best_threshold
+)
+
+lasso_1se.up.probs <- predict(lasso_1se.up, newx = x_test_mat.up, type = "response")
+
+lasso_1se.up.opt_treshold <- optimize_threshold(y_test.genes, lasso_1se.up.probs)
+
+lasso_1se.up.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_1se.up.probs,
+  threshold = lasso_1se.up.opt_treshold$best_threshold
+)
+```
+
+### BASE LASSO WITH WEIGHTS
+
+```{r}
+# BASE LASSO WITH WEIGHTS
+lasso_reg.weighted <- glmnet(x_train_mat, y_train, alpha = 1, 
+                    family="binomial", standardize=TRUE, weights = model_weights)
+
+lasso_cv_model.weighted <- cv.glmnet(x_train_mat, y_train, alpha = 1, 
+                            n_folds=10, family="binomial",
+                            standardize = TRUE, weights = model_weights)
+
+lasso_min_lambda.weighted <- lasso_cv_model.weighted$lambda.min
+lasso_1se_lambda.weighted <- lasso_cv_model.weighted$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min_lambda.weighted, "\nLambda 1SE : ", lasso_1se_lambda.weighted)
+```
+
+```{r}
+lasso_min.weighted <- glmnet(x_train_mat, y_train, 
+                          alpha = 1, lambda = lasso_min_lambda.weighted, 
+                          family="binomial", 
+                          standardize = TRUE, weights = model_weights)
+lasso_1se.weighted <- glmnet(x_train_mat, y_train, 
+                          alpha = 1, lambda = lasso_1se_lambda.weighted, 
+                          family="binomial", 
+                          standardize = TRUE, weights = model_weights)
+```
+
+```{r}
+lasso_min.weighted.probs <- predict(lasso_min.weighted, newx = x_test_mat, type = "response")
+
+lasso_min.weighted.opt_treshold <- optimize_threshold(y_test, lasso_min.weighted.probs)
+
+lasso_min.weighted.perf <- get_performances(
+  y_true  = y_test,
+  y_probs = lasso_min.weighted.probs,
+  threshold = lasso_min.weighted.opt_treshold$best_threshold
+)
+
+lasso_1se.weighted.probs <- predict(lasso_1se.weighted, newx = x_test_mat, type = "response")
+
+lasso_1se.weighted.opt_treshold <- optimize_threshold(y_test, lasso_1se.weighted.probs)
+
+lasso_1se.weighted.perf <- get_performances(
+  y_true  = y_test,
+  y_probs = lasso_1se.weighted.probs,
+  threshold = lasso_1se.weighted.opt_treshold$best_threshold
+)
+```
+
+### LASSO WITH WEIGHTS - WITH ALL GENES
+
+```{r}
+# LASSO WITH WEIGHTS AND ALL GENES
+lasso_reg.genes.weighted <- glmnet(x_train_mat.genes, y_train.genes, alpha = 1, 
+                    family="binomial", standardize=TRUE, 
+                    weights = model_weights.genes)
+
+lasso_cv_model.genes.weighted <- cv.glmnet(x_train_mat.genes, y_train.genes, 
+                            alpha = 1, 
+                            n_folds=10, family="binomial",
+                            standardize = TRUE, weights = model_weights.genes)
+
+lasso_min_lambda.genes.weighted <- lasso_cv_model.genes.weighted$lambda.min
+lasso_1se_lambda.genes.weighted <- lasso_cv_model.genes.weighted$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min_lambda.genes.weighted, "\nLambda 1SE : ", lasso_1se_lambda.genes.weighted)
+```
+
+```{r}
+lasso_min.genes.weighted <- glmnet(x_train_mat.genes, y_train.genes, 
+                          alpha = 1, lambda = lasso_min_lambda.genes.weighted, 
+                          family="binomial", 
+                          standardize = TRUE, weights = model_weights.genes)
+lasso_1se.genes.weighted <- glmnet(x_train_mat.genes, y_train.genes, 
+                          alpha = 1, lambda = lasso_1se_lambda.genes.weighted, 
+                          family="binomial", 
+                          standardize = TRUE, weights = model_weights.genes)
+```
+
+```{r}
+lasso_min.genes.weighted.probs <- predict(lasso_min.genes.weighted, 
+                                          newx = x_test_mat.genes, type = "response")
+
+lasso_min.genes.weighted.opt_treshold <- optimize_threshold(y_test.genes, lasso_min.genes.weighted.probs)
+
+lasso_min.genes.weighted.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_min.genes.weighted.probs,
+  threshold = lasso_min.genes.weighted.opt_treshold$best_threshold
+)
+
+lasso_1se.genes.weighted.probs <- predict(lasso_1se.genes.weighted, newx = x_test_mat.genes, type = "response")
+
+lasso_1se.genes.weighted.opt_treshold <- optimize_threshold(y_test.genes, lasso_1se.genes.weighted.probs)
+
+lasso_1se.genes.weighted.perf <- get_performances(
+  y_true  = y_test.genes,
+  y_probs = lasso_1se.genes.weighted.probs,
+  threshold = lasso_1se.genes.weighted.opt_treshold$best_threshold
+)
+```
+
+## Elastic Net Regression Models (Alpha Tuning Per Case)
+
+```{r}
+alpha_grid <- seq(0, 1, by = 0.05)
+```
+
+```{r}
+library(glmnet)
+set.seed(42)
+
+find_optimal_alpha_lambda <- function(x, y, alpha_grid, k_folds = 10, weights = NULL) {
+  
+  foldid <- sample(rep(seq(k_folds), length.out = length(y)))
+  
+  best_alpha <- NA
+  best_lambda <- NA
+  min_error <- Inf
+  
+  for (a in alpha_grid) {
+    
+    cv_fit <- cv.glmnet(
+      x, y,
+      alpha = a,
+      foldid = foldid,
+      family = "binomial",
+      type.measure = "deviance",
+      standardize = TRUE,
+      weights = weights # Handles weighted cases
+    )
+    
+    curr_error <- min(cv_fit$cvm)
+    
+    if (curr_error < min_error) {
+      min_error <- curr_error
+      best_alpha <- a
+      lambda_min <- cv_fit$lambda.min
+      lambda_1se <- cv_fit$lamba.1se
+    }
+  }
+  
+  list(best_alpha = best_alpha, lambda_min = lambda_min, lambda_1se = lambda_1se)
+}
+```
+
+```{r}
+enet.params <- find_optimal_alpha_lambda(x_train_mat, y_train, alpha_grid)
+enet.up.params <- find_optimal_alpha_lambda(x_train_mat.up, y_train.up, alpha_grid)
+enet.weights.params <- find_optimal_alpha_lambda(x_train_mat, y_train, alpha_grid, weights = model_weights)
+
+enet.genes.params <- find_optimal_alpha_lambda(x_train_mat.genes, y_train.genes, alpha_grid)
+enet.genes.up.params <- find_optimal_alpha_lambda(x_train_mat.genes.up, y_train.genes.up, alpha_grid)
+enet.genes.weights.params <- find_optimal_alpha_lambda(x_train_mat.genes, y_train.genes, alpha_grid, weights = model_weights.genes)
+```
+
+### BASE EN - WITH CANCER SUBTYPE
+
+```{r}
+enet_reg <- glmnet(
+  x_train_mat, y_train,
+  alpha = enet.params$best_alpha,
+  family = "binomial", standardize = TRUE
+)
+
+enet_cv_model <- cv.glmnet(
+  x_train_mat, y_train,
+  alpha = enet.params$best_alpha,
+  n_folds = 10, family = "binomial",
+  standardize = TRUE
+)
+
+enet_min.lambda <- enet_cv_model$lambda.min
+enet_1se.lambda <- enet_cv_model$lambda.1se
+cat("Lambda min:", enet_min.lambda, "\nLambda 1SE:", enet_1se.lambda)
+```
+
+```{r}
+enet_min <- glmnet(
+  x_train_mat, y_train,
+  alpha = enet.params$best_alpha,
+  lambda = enet_min.lambda,
+  family="binomial", standardize=TRUE
+)
+
+enet_1se <- glmnet(
+  x_train_mat, y_train,
+  alpha = enet.params$best_alpha,
+  lambda = enet_1se.lambda,
+  family="binomial", standardize=TRUE
+)
+```
+
+```{r}
+enet_min.probs <- predict(enet_min, newx = x_test_mat, type="response")
+enet_min.opt_treshold <- optimize_threshold(y_test, enet_min.probs)
+
+enet_min.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_min.probs,
+  threshold=enet_min.opt_treshold$best_threshold
+)
+
+enet_1se.probs <- predict(enet_1se, newx = x_test_mat, type="response")
+enet_1se.opt_treshold <- optimize_threshold(y_test, enet_1se.probs)
+
+enet_1se.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_1se.probs,
+  threshold=enet_1se.opt_treshold$best_threshold
+)
+```
+
+```{r}
+enet_min.probs <- predict(enet_min, newx = x_test_mat, type="response")
+enet_min.opt_treshold <- optimize_threshold(y_test, enet_min.probs)
+
+enet_min.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_min.probs,
+  threshold=enet_min.opt_treshold$best_threshold
+)
+
+enet_1se.probs <- predict(enet_1se, newx = x_test_mat, type="response")
+enet_1se.opt_treshold <- optimize_threshold(y_test, enet_1se.probs)
+
+enet_1se.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_1se.probs,
+  threshold=enet_1se.opt_treshold$best_threshold
+)
+```
+
+### BASE EN - WITH ALL GENES
+
+```{r}
+enet_reg.genes <- glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.params$best_alpha,
+  family="binomial", standardize=TRUE
+)
+
+enet_cv_model.genes <- cv.glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.params$best_alpha,
+  n_folds=10, family="binomial", standardize=TRUE
+)
+
+enet_min_lambda.genes <- enet_cv_model.genes$lambda.min
+enet_1se_lambda.genes <- enet_cv_model.genes$lambda.1se
+```
+
+```{r}
+enet_min.genes <- glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.params$best_alpha,
+  lambda = enet_min_lambda.genes,
+  family="binomial", standardize=TRUE
+)
+
+enet_1se.genes <- glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.params$best_alpha,
+  lambda = enet_1se_lambda.genes,
+  family="binomial", standardize=TRUE
+)
+```
+
+```{r}
+enet_min.genes.probs <- predict(enet_min.genes, newx=x_test_mat.genes, type="response")
+enet_min.genes.opt_treshold <- optimize_threshold(y_test.genes, enet_min.genes.probs)
+
+enet_min.genes.perf <- get_performances(
+  y_true = y_test.genes,
+  y_probs = enet_min.genes.probs,
+  threshold = enet_min.genes.opt_treshold$best_threshold
+)
+
+enet_1se.genes.probs <- predict(enet_1se.genes, newx=x_test_mat.genes, type="response")
+enet_1se.genes.opt_treshold <- optimize_threshold(y_test.genes, enet_1se.genes.probs)
+
+enet_1se.genes.perf <- get_performances(
+  y_true = y_test.genes,
+  y_probs = enet_1se.genes.probs,
+  threshold = enet_1se.genes.opt_treshold$best_threshold
+)
+```
+
+### EN UPSAMPLED - WITH ALL GENES
+
+```{r}
+enet_reg.genes.up <- glmnet(
+  x_train_mat.genes.up, y_train.genes.up,
+  alpha = enet.genes.up.params$best_alpha,
+  family="binomial", standardize=TRUE
+)
+
+enet_cv_model.genes.up <- cv.glmnet(
+  x_train_mat.genes.up, y_train.genes.up,
+  alpha = enet.genes.up.params$best_alpha,
+  n_folds=10, family="binomial", standardize=TRUE
+)
+
+enet_min_lambda.genes.up <- enet_cv_model.genes.up$lambda.min
+enet_1se_lambda.genes.up <- enet_cv_model.genes.up$lambda.1se
+```
+
+```{r}
+enet_min.genes.up <- glmnet(
+  x_train_mat.genes.up, y_train.genes.up,
+  alpha = enet.genes.up.params$best_alpha,
+  lambda = enet_min_lambda.genes.up,
+  family="binomial", standardize=TRUE
+)
+
+enet_1se.genes.up <- glmnet(
+  x_train_mat.genes.up, y_train.genes.up,
+  alpha = enet.genes.up.params$best_alpha,
+  lambda = enet_1se_lambda.genes.up,
+  family="binomial", standardize=TRUE
+)
+```
+
+```{r}
+enet_min.genes.up.probs <- predict(enet_min.genes.up, newx=x_test_mat.genes.up, type="response")
+enet_min.genes.up.opt_treshold <- optimize_threshold(y_test.genes, enet_min.genes.up.probs)
+
+enet_min.genes.up.perf <- get_performances(
+  y_true=y_test.genes,
+  y_probs=enet_min.genes.up.probs,
+  threshold=enet_min.genes.up.opt_treshold$best_threshold
+)
+
+enet_1se.genes.up.probs <- predict(enet_1se.genes.up, newx=x_test_mat.genes.up, type="response")
+enet_1se.genes.up.opt_treshold <- optimize_threshold(y_test.genes, enet_1se.genes.up.probs)
+
+enet_1se.genes.up.perf <- get_performances(
+  y_true=y_test.genes,
+  y_probs=enet_1se.genes.up.probs,
+  threshold=enet_1se.genes.up.opt_treshold$best_threshold
+)
+```
+
+### EN UPSAMPLED - WITH CANCER SUBTYPE
+
+```{r}
+enet_reg.up <- glmnet(
+  x_train_mat.up, y_train.up,
+  alpha = enet.up.params$best_alpha,
+  family="binomial", standardize=TRUE
+)
+
+enet_cv_model.up <- cv.glmnet(
+  x_train_mat.up, y_train.up,
+  alpha = enet.up.params$best_alpha,
+  n_folds=10, family="binomial", standardize=TRUE
+)
+
+enet_min_lambda.up <- enet_cv_model.up$lambda.min
+enet_1se_lambda.up <- enet_cv_model.up$lambda.1se
+```
+
+```{r}
+enet_min.up <- glmnet(
+  x_train_mat.up, y_train.up,
+  alpha = enet.up.params$best_alpha,
+  lambda = enet_min_lambda.up,
+  family="binomial", standardize=TRUE
+)
+
+enet_1se.up <- glmnet(
+  x_train_mat.up, y_train.up,
+  alpha = enet.up.params$best_alpha,
+  lambda = enet_1se_lambda.up,
+  family="binomial", standardize=TRUE
+)
+```
+
+```{r}
+enet_min.up.probs <- predict(enet_min.up, newx=x_test_mat.up, type="response")
+enet_min.up.opt_treshold <- optimize_threshold(y_test, enet_min.up.probs)
+
+enet_min.up.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_min.up.probs,
+  threshold=enet_min.up.opt_treshold$best_threshold
+)
+
+enet_1se.up.probs <- predict(enet_1se.up, newx=x_test_mat.up, type="response")
+enet_1se.up.opt_treshold <- optimize_threshold(y_test, enet_1se.up.probs)
+
+enet_1se.up.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_1se.up.probs,
+  threshold=enet_1se.up.opt_treshold$best_threshold
+)
+```
+
+### EN WITH WEIGHTS - WITH CANCER SUBTYPE
+
+```{r}
+enet_reg.weighted <- glmnet(
+  x_train_mat, y_train,
+  alpha = enet.weights.params$best_alpha,
+  family="binomial", standardize=TRUE,
+  weights = model_weights
+)
+
+enet_cv_model.weighted <- cv.glmnet(
+  x_train_mat, y_train,
+  alpha = enet.weights.params$best_alpha,
+  n_folds=10, family="binomial",
+  standardize=TRUE,
+  weights = model_weights
+)
+
+enet_min_lambda.weighted <- enet_cv_model.weighted$lambda.min
+enet_1se_lambda.weighted <- enet_cv_model.weighted$lambda.1se
+```
+
+```{r}
+enet_min.weighted <- glmnet(
+  x_train_mat, y_train,
+  alpha = enet.weights.params$best_alpha,
+  lambda = enet_min_lambda.weighted,
+  family="binomial", standardize=TRUE,
+  weights = model_weights
+)
+
+enet_1se.weighted <- glmnet(
+  x_train_mat, y_train,
+  alpha = enet.weights.params$best_alpha,
+  lambda = enet_1se_lambda.weighted,
+  family="binomial", standardize=TRUE,
+  weights = model_weights
+)
+```
+
+```{r}
+enet_min.weighted.probs <- predict(enet_min.weighted, newx=x_test_mat, type="response")
+enet_min.weighted.opt_treshold <- optimize_threshold(y_test, enet_min.weighted.probs)
+
+enet_min.weighted.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_min.weighted.probs,
+  threshold=enet_min.weighted.opt_treshold$best_threshold
+)
+
+enet_1se.weighted.probs <- predict(enet_1se.weighted, newx=x_test_mat, type="response")
+enet_1se.weighted.opt_treshold <- optimize_threshold(y_test, enet_1se.weighted.probs)
+
+enet_1se.weighted.perf <- get_performances(
+  y_true=y_test,
+  y_probs=enet_1se.weighted.probs,
+  threshold=enet_1se.weighted.opt_treshold$best_threshold
+)
+```
+
+### EN WITH WEIGHTS - WITH ALL GENES
+
+```{r}
+enet_reg.genes.weighted <- glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.weights.params$best_alpha,
+  family="binomial", standardize=TRUE,
+  weights = model_weights.genes
+)
+
+enet_cv_model.genes.weighted <- cv.glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.weights.params$best_alpha,
+  n_folds=10, family="binomial",
+  standardize=TRUE,
+  weights = model_weights.genes
+)
+
+enet_min_lambda.genes.weighted <- enet_cv_model.genes.weighted$lambda.min
+enet_1se_lambda.genes.weighted <- enet_cv_model.genes.weighted$lambda.1se
+```
+
+```{r}
+enet_min.genes.weighted <- glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.weights.params$best_alpha,
+  lambda = enet_min_lambda.genes.weighted,
+  family="binomial", standardize=TRUE,
+  weights = model_weights.genes
+)
+
+enet_1se.genes.weighted <- glmnet(
+  x_train_mat.genes, y_train.genes,
+  alpha = enet.genes.weights.params$best_alpha,
+  lambda = enet_1se_lambda.genes.weighted,
+  family="binomial", standardize=TRUE,
+  weights = model_weights.genes
+)
+```
+
+```{r}
+enet_min.genes.weighted.probs <- predict(enet_min.genes.weighted, newx=x_test_mat.genes, type="response")
+enet_min.genes.weighted.opt_treshold <- optimize_threshold(y_test.genes, enet_min.genes.weighted.probs)
+
+enet_min.genes.weighted.perf <- get_performances(
+  y_true=y_test.genes,
+  y_probs=enet_min.genes.weighted.probs,
+  threshold=enet_min.genes.weighted.opt_treshold$best_threshold
+)
+
+enet_1se.genes.weighted.probs <- predict(enet_1se.genes.weighted, newx=x_test_mat.genes, type="response")
+enet_1se.genes.weighted.opt_treshold <- optimize_threshold(y_test.genes, enet_1se.genes.weighted.probs)
+
+enet_1se.genes.weighted.perf <- get_performances(
+  y_true=y_test.genes,
+  y_probs=enet_1se.genes.weighted.probs,
+  threshold=enet_1se.genes.weighted.opt_treshold$best_threshold
+)
+```
+
+```{r}
+# BASE EN - WITH CANCER SUBTYPE
+cat("BASE EN - CANCER SUBTYPE\n")
+cat("enet_min threshold:", enet_min.opt_treshold$best_threshold, "\n")
+cat("enet_1se threshold:", enet_1se.opt_treshold$best_threshold, "\n")
+cat("best alpha:", enet.params$best_alpha, "\n\n")
+
+# BASE EN - WITH ALL GENES
+cat("BASE EN - ALL GENES\n")
+cat("enet_min.genes threshold:", enet_min.genes.opt_treshold$best_threshold, "\n")
+cat("enet_1se.genes threshold:", enet_1se.genes.opt_treshold$best_threshold, "\n")
+cat("best alpha:", enet.genes.params$best_alpha, "\n\n")
+
+# EN UPSAMPLED - WITH ALL GENES
+cat("EN UPSAMPLED - ALL GENES\n")
+cat("enet_min.genes.up threshold:", enet_min.genes.up.opt_treshold$best_threshold, "\n")
+cat("enet_1se.genes.up threshold:", enet_1se.genes.up.opt_treshold$best_threshold, "\n")
+cat("best alpha:", enet.genes.up.params$best_alpha, "\n\n")
+
+# EN UPSAMPLED - WITH CANCER SUBTYPE
+cat("EN UPSAMPLED - CANCER SUBTYPE\n")
+cat("enet_min.up threshold:", enet_min.up.opt_treshold$best_threshold, "\n")
+cat("enet_1se.up threshold:", enet_1se.up.opt_treshold$best_threshold, "\n")
+cat("best alpha:", enet.up.params$best_alpha, "\n\n")
+
+# EN WITH WEIGHTS - WITH CANCER SUBTYPE
+cat("EN WITH WEIGHTS - CANCER SUBTYPE\n")
+cat("enet_min.weighted threshold:", enet_min.weighted.opt_treshold$best_threshold, "\n")
+cat("enet_1se.weighted threshold:", enet_1se.weighted.opt_treshold$best_threshold, "\n")
+cat("best alpha:", enet.weights.params$best_alpha, "\n\n")
+
+# EN WITH WEIGHTS - WITH ALL GENES
+cat("EN WITH WEIGHTS - ALL GENES\n")
+cat("enet_min.genes.weighted threshold:", enet_min.genes.weighted.opt_treshold$best_threshold, "\n")
+cat("enet_1se.genes.weighted threshold:", enet_1se.genes.weighted.opt_treshold$best_threshold, "\n")
+cat("best alpha:", enet.genes.weights.params$best_alpha, "\n\n")
+
+```
+
+```{r}
+# ----- FULL MODEL -----
+full_opt_threshold <- optimize_threshold(y_test, full_model_probs)
+full_perf <- get_performances(
+  y_true = y_test,
+  y_probs = full_model_probs,
+  threshold = full_opt_threshold$best_threshold
+)
+
+# ----- STEPWISE AIC MODEL -----
+stepwise_aic_opt_threshold <- optimize_threshold(y_test, stepwise_aic_probs)
+stepwise_aic_perf <- get_performances(
+  y_true = y_test,
+  y_probs = stepwise_aic_probs,
+  threshold = stepwise_aic_opt_threshold$best_threshold
+)
+
+# ----- STEPWISE BIC MODEL -----
+stepwise_bic_opt_threshold <- optimize_threshold(y_test, stepwise_bic_probs)
+stepwise_bic_perf <- get_performances(
+  y_true = y_test,
+  y_probs = stepwise_bic_probs,
+  threshold = stepwise_bic_opt_threshold$best_threshold
+)
+
+# ----- Print all results -----
+full_perf
+stepwise_aic_perf
+stepwise_bic_perf
+
+```
+
+## Accept Reject Lasso (ARL)
+
+### With the clustered data
+
+```{r}
+library(stabs)
+library(glmnet)
+
+set.seed(123)
+
+stab_lasso <- stabsel(
+  x = x_train_mat,
+  y = y_train,
+  fitfun = glmnet.lasso, 
+  cutoff = 0.65,      # selection probability threshold
+  PFER = 10            # controls expected false selections
+)
+
+stable_features <- names(stab_lasso$selected)
+length(stable_features)
+```
+
+```{r}
+x_train_stable <- x_train_mat[, stable_features, drop = FALSE]
+x_test_stable  <- x_test_mat[,  stable_features, drop = FALSE]
+
+cv_stable_lasso <- cv.glmnet(
+  x = x_train_stable,
+  y = y_train,
+  family = "binomial",
+  alpha = 1
+)
+
+# Get fitted model
+stable_lasso_model <- cv_stable_lasso$glmnet.fit
+
+stable_probs <- predict(
+  cv_stable_lasso,
+  newx = x_test_stable,
+  s = "lambda.min",
+  type = "response"
+)
+
+stable_opt <- optimize_threshold(y_test, stable_probs)
+stable_threshold <- stable_opt$best_threshold
+
+stable_perf <- get_performances(
+  y_true = y_test,
+  y_probs = stable_probs,
+  threshold = stable_threshold
+)
+
+stable_perf
+```
+
+### With all genes
+
+```{r}
+library(stabs)
+library(glmnet)
+
+set.seed(123)
+
+stab_lasso.genes <- stabsel(
+  x = x_train_mat.genes,
+  y = y_train.genes,
+  fitfun = glmnet.lasso, 
+  cutoff = 0.6,      # selection probability threshold
+  PFER = 50           # controls expected false selections
+)
+
+stable_features.genes <- names(stab_lasso.genes$selected)
+length(stable_features.genes)
+stable_features.genes
+```
+
+```{r}
+x_train_stable.genes <- x_train_mat.genes[, stable_features.genes, drop = FALSE]
+x_test_stable.genes  <- x_test_mat.genes[,  stable_features.genes, drop = FALSE]
+
+cv_stable_lasso.genes <- cv.glmnet(
+  x = x_train_stable.genes,
+  y = y_train.genes,
+  family = "binomial",
+  alpha = 1,
+  standardize = TRUE
+)
+
+# Get fitted model
+lasso_stable.genes <- cv_stable_lasso.genes$glmnet.fit
+
+stable_probs.genes <- predict(
+  cv_stable_lasso.genes,
+  newx = x_test_stable.genes,
+  s = "lambda.min",
+  type = "response"
+)
+
+stable_opt.genes <- optimize_threshold(y_test, stable_probs)
+stable_threshold.genes <- stable_opt.genes$best_threshold
+
+stable_perf.genes <- get_performances(
+  y_true = y_test.genes,
+  y_probs = stable_probs.genes,
+  threshold = stable_threshold.genes
+)
+
+stable_perf.genes
+```
+
+## Variable decorrelation Lasso
+
+```{r}
+library(glmnet)
+library(caret)
+library(cluster)
+
+cor_mat <- cor(x_train_mat.genes)
+```
+
+```{r}
+d <- as.dist(1 - abs(cor_mat))   # strong correlations → small distance
+clust <- hclust(d, method = "average")
+
+# choose number of clusters automatically
+k <- max(2, round(ncol(x_train_mat.genes) / 20))
+clusters <- cutree(clust, k = k)
+```
+
+```{r}
+safe_pca <- function(train_block, test_block) {
+  # Force matrix form
+  train_block <- as.matrix(train_block)
+  test_block  <- as.matrix(test_block)
+  
+  if (ncol(train_block) == 1) {
+    # If only one gene in the cluster → no PCA needed
+    # Use standardized gene as the component
+    mean_tr <- mean(train_block)
+    sd_tr   <- sd(train_block)
+    
+    # Return scaled values
+    return(list(
+      train_pc1 = (train_block - mean_tr) / sd_tr,
+      test_pc1  = (test_block - mean_tr) / sd_tr
+    ))
+  } else {
+    # Standard PCA on clusters with >1 gene
+    pc <- prcomp(train_block, scale = TRUE)
+    return(list(
+      train_pc1 = pc$x[, 1],
+      test_pc1  = predict(pc, newdata = test_block)[, 1]
+    ))
+  }
+}
+```
+
+```{r}
+cluster_ids <- unique(clusters)
+
+train_list <- list()
+test_list  <- list()
+
+for (cl in cluster_ids) {
+  block_train <- x_train_mat.genes[, clusters == cl]
+  block_test  <- x_test_mat.genes[,  clusters == cl]
+  
+  comp <- safe_pca(block_train, block_test)
+  
+  train_list[[as.character(cl)]] <- comp$train_pc1
+  test_list[[as.character(cl)]]  <- comp$test_pc1
+}
+
+reduced_train <- do.call(cbind, train_list)
+reduced_test  <- do.call(cbind, test_list)
+```
+
+```{r}
+lasso_decorr <- cv.glmnet(
+  x = reduced_train,
+  y = y_train.genes,
+  family = "binomial",
+  alpha = 1
+)
+
+decorr_probs <- predict(lasso_decorr,
+                        newx = reduced_test,
+                        type = "response",
+                        s = "lambda.min")
+
+decorr_probs <- as.numeric(decorr_probs)
+
+lasso_decorr_opt_treshold <- optimize_threshold(y_test.genes, decorr_probs)$best_threshold
+
+lasso_decorr.perf <- get_performances(y_test.genes, decorr_probs, lasso_decorr_opt_treshold)
+
+lasso_decorr.perf
+```
+
+## UniLasso
+
+```{r}
+get_univariate_pvals <- function(X, y) {
+  pvals <- apply(X, 2, function(col) {
+    model <- suppressWarnings(glm(y ~ col, family = "binomial"))
+    summary(model)$coefficients[2, 4]  # p-value of predictor
+  })
+  return(pvals)
+}
+
+pvals <- get_univariate_pvals(x_train_mat.genes, y_train.genes)
+
+K <- 30
+top_genes <- names(pvals[pvals < 0.05])
+
+length(top_genes)
+
+
+Xtrain_uni <- x_train_mat.genes[, top_genes, drop = FALSE]
+Xtest_uni  <- x_test_mat.genes[, top_genes, drop = FALSE]
+
+lasso_uni <- cv.glmnet(
+  x = Xtrain_uni,
+  y = y_train.genes,
+  family = "binomial",
+  alpha = 1
+)
+
+uni_probs <- predict(lasso_uni,
+                     newx = Xtest_uni,
+                     type = "response",
+                     s = "lambda.min")
+
+uni_probs <- as.numeric(uni_probs)
+
+uni_best_thresh <- optimize_threshold(y_test.genes, uni_probs)$best_threshold
+
+uni.perf <- get_performances(y_test.genes, uni_probs, uni_best_thresh)
+uni.perf
+```

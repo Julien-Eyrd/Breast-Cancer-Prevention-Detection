@@ -1,0 +1,558 @@
+---
+title: "MRR Project - Genes & Breast Cancer - EDA"
+author: "Julien EYRAUD & Alexandre GOIGNARD"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    #toc: true
+    #toc_depth: 3
+    keep_tex: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+graphics.off()
+
+#remove code parts
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Classification of Cancer outcome using Genetic and Clinical data
+
+# Introduction
+
+This project investigates the effect of genetic and clinical variables on the survival outcome of breast cancer patients. The data contains records of more than 1000 breast cancer patients from several research institutions. Clinical data contains patient-related and tumor-related information. Additionally mRNA gene expression data is available for each patient. The gene expression data has been processed to include only the top 5000 most variable genes on the transformed scale (log2(counts + 1)).
+
+We consider that the main outcome variable of interest is **vital_status**, which is defined in clinical data.
+
+## Load data
+
+```{r cars}
+load("mrr_bio.Rdata")
+
+# genetic data: n x p matrix
+dim(GeneX) # 1231 x 5000 
+str(GeneX)
+colnames(GeneX)[1:10] # first 10 names of genes
+
+# clinical data
+dim(clinical_data) # 1231 x 24
+head(clinical_data)
+colnames(clinical_data) # variables
+
+# outcome variable
+y = clinical_data$vital_status
+table(y)
+```
+
+## Exploratory data analysis: example
+
+```{r}
+# summary statistics of first 10 genes
+apply(GeneX[,1:10],2, summary)
+
+# clinical variables: gender
+unique(clinical_data$gender) # unique values
+table(clinical_data$gender) # frequency
+```
+
+```{r}
+Y_bin = ifelse(y == "Dead", 1, 0)
+table(Y_bin)
+```
+
+```{r}
+clinical_data <- as.data.frame(clinical_data)
+GeneX <- as.data.frame(GeneX)
+
+Y_bin = ifelse(clinical_data$vital_status == "Dead", 1, 0)
+table(Y_bin)
+str(GeneX)
+```
+
+\newpage
+
+# Description & Statistical Analysis
+
+This study relies on two complementary datasets: a high-dimensional gene expression matrix (**GeneX**) and a detailed clinical dataset (**clinical_data**). Together, they allow us to explore the relationship between molecular profiles and patient outcomes in breast cancer, with a particular focus on **vital status**, which serves as the target variable in our predictive modelling.
+
+## Gene Expression Dataset (GeneX)
+
+The **GeneX dataset** contains quantitative gene expression measurements for **1,231 breast cancer samples**.\
+Each **row** corresponds to a patient and each **column** corresponds to one of **5,000 genes**, identified by their official gene symbols (e.g., *CLEC3A*, *GSTM1*, *KRT14*).
+
+All values are continuous with typical ranges between 0 and 20.
+
+This dataset provides the molecular dimension of the study and is used to detect **patterns of co-expression**, identify **groups of biologically similar genes**, and evaluate how these molecular clusters relate to patient survival outcomes.
+
+## Clinical Dataset (clinical_data)
+
+The **clinical_data** dataset contains the clinical and demographic information corresponding to the same **1,231 breast cancer patients** included in GeneX. It consists of **24 variables** covering tumor characteristics, patient attributes, pathological diagnosis, treatment history, and follow-up data.
+
+## Complementarity of the two datasets
+
+| Dataset | Number of samples | Data Type | Predictors Number | Structure |
+|---------------|---------------|---------------|---------------|---------------|
+| GeneX | 1231 | Continuous numerical | 5000 | High-dimensional (p \>\> n) |
+| Clinical Data | 1231 | Mixed (categorical, numerical, lists) | 24 | Tabular, patient-level data |
+
+Together, GeneX and clinical_data form a rich, multi-dimensional dataset where:
+
+-   **GeneX** provides molecular-level features
+
+-   **clinical_data** provides patient-level descriptors
+
+-   **vital_status** is the clinical endpoint of interest
+
+```{r}
+require(ggplot2)
+clinical_data$vital_status <- factor(clinical_data$vital_status,
+                                     levels = c("Alive", "Dead"))
+
+ggplot(clinical_data, aes(x = vital_status, fill = vital_status)) +
+  geom_bar() +
+  labs(title = "Distribution of the Target Variable (Vital Status)",
+       x = "Vital Status",
+       y = "Number of Patients") +
+  theme_minimal()
+
+```
+
+```{r}
+
+ggplot(clinical_data, aes(x = vital_status, y = age_at_diagnosis/365, fill = vital_status)) +
+  geom_boxplot() +
+  labs(title = "Age at Diagnosis by Vital Status",
+       x = "Vital Status",
+       y = "Age at Diagnosis (years)") +
+  theme_minimal()
+
+library(dplyr)
+
+clinical_data %>%
+  group_by(vital_status) %>%
+  summarize(mean_age = mean(age_at_diagnosis/365, na.rm = TRUE))
+
+```
+
+```{r}
+
+ggplot(clinical_data, aes(x = primary_diagnosis)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Distribution of Tumor Histological Subtypes",
+       x = "Primary Diagnosis",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+table(clinical_data$primary_diagnosis)
+```
+
+```{r}
+require(dplyr)
+subtype_counts <- clinical_data %>%
+  group_by(primary_diagnosis) %>%
+  summarise(count = n(), .groups = "drop") %>%  
+  filter(count >= 5) %>%                        
+  arrange(desc(count))                           
+
+subtype_counts
+primary_subtypes <- subtype_counts$primary_diagnosis
+```
+
+```{r}
+percentages <- clinical_filtered %>%
+  count(primary_diagnosis, vital_status) %>%
+  group_by(primary_diagnosis) %>%
+  mutate(
+    total = sum(n),
+    percentage = (n / total) * 100
+  ) %>%
+  ungroup()
+
+print(percentages)
+
+clinical_filtered <- clinical_data %>%
+  filter(primary_diagnosis %in% primary_subtypes)
+
+ggplot(clinical_filtered, aes(x = primary_diagnosis, fill = vital_status)) +
+  geom_bar(position = "fill") +
+  labs(title = "Primary Tumor Subtype vs. Patient Vital Status",
+       x = "Tumor Subtype",
+       y = "Proportion") +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+median_expr <- apply(GeneX, 2, median, na.rm = TRUE)
+mean_expr   <- apply(GeneX, 2, mean,   na.rm = TRUE)
+
+
+plot(median_expr, type = "l", lwd = 2,
+     xlab = "Gene (index)", ylab = "Median Expression",
+     main = "Median Gene across Genes")
+
+
+```
+
+```{r}
+sd_expr <- apply(GeneX, 2, sd, na.rm = TRUE)
+                 
+
+plot(sd_expr, type = "l", lwd = 2,
+     xlab = "Gene (index)", ylab = "Standard deviation",
+     main = "Standard deviation across Genes")
+```
+
+```{r}
+IQR_expr <- apply(GeneX, 2, IQR, na.rm = TRUE)
+                 
+
+plot(IQR_expr, type = "l", lwd = 2,
+     xlab = "Gene (index)", ylab = "IQR",
+     main = "Interquantile Range Across Genes")
+```
+
+```{r}
+t_counts <- clinical_data %>%
+  group_by(ajcc_pathologic_t) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  arrange(desc(count))
+
+t_counts
+```
+
+```{r}
+require(dplyr)
+require(tidyr)
+
+ajcc_levels <- sort(unique(clinical_data$ajcc_pathologic_t))
+
+summary_df <- clinical_filtered %>%
+  group_by(primary_diagnosis) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  left_join(
+    clinical_filtered %>%
+      group_by(primary_diagnosis, ajcc_pathologic_t) %>%
+      summarise(ajcc_count = n(), .groups = "drop") %>%
+      pivot_wider(
+        names_from = ajcc_pathologic_t,
+        values_from = ajcc_count,
+        values_fill = 0
+      ),
+    by = "primary_diagnosis"
+  ) %>%
+
+  mutate(across(any_of(ajcc_levels), ~ replace_na(.x, 0))) %>%
+  select(primary_diagnosis, count, any_of(ajcc_levels))
+
+summary_df
+```
+
+```{r}
+require(ggplot2)
+require(scales)
+
+tstage_percentages <- clinical_data %>%
+  count(ajcc_pathologic_t, vital_status) %>%
+  group_by(ajcc_pathologic_t) %>%
+  mutate(
+    total = sum(n),
+    percentage = (n / total) * 100
+  ) %>%
+  ungroup()
+
+
+print(tstage_percentages)
+
+ggplot(clinical_data, aes(x = ajcc_pathologic_t, fill = vital_status)) +
+  geom_bar(position = "fill") +  # "fill" makes it proportional
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Proportion of Vital Status by AJCC Pathologic T Stage",
+    x = "AJCC Pathologic T Stage",
+    y = "Proportion",
+    fill = "Vital Status"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+require(corrplot)
+numeric_vars <- clinical_data[ , sapply(clinical_data, is.numeric)]
+
+corr_matrix <- cor(numeric_vars, use = "pairwise.complete.obs")
+corrplot(corr_matrix, method = "color", type = "upper",
+         tl.cex = 0.8, number.cex = 0.7)
+```
+
+```{r}
+require(dplyr)
+require(corrplot)
+
+clinical_data <- clinical_data %>%
+  mutate(vital_status_num = ifelse(vital_status == "Alive", 0,
+                                   ifelse(vital_status == "Dead", 1, NA)))
+
+numeric_vars <- clinical_data %>%
+  select(age_at_diagnosis, where(is.numeric), vital_status_num)
+
+corr_matrix <- cor(numeric_vars, use = "pairwise.complete.obs")
+
+corrplot(corr_matrix, method = "color", type = "upper",
+         tl.cex = 0.8, number.cex = 0.7)
+```
+
+```{r}
+table(clinical_data$follow_ups_disease_response)
+table(clinical_data$vital_status)
+table(clinical_data$tissue_type)
+table(clinical_filtered$prior_treatment)
+table(clinical_data$age_is_obfuscated)
+```
+
+```         
+```
+
+```{r}
+ggplot(clinical_filtered, aes(x = primary_diagnosis, fill = race)) +
+  geom_bar(position = "fill") +  # "fill" makes it proportional
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Proportion of race by primary diagnosis",
+    x = "Primary diagnosis",
+    y = "Proportion",
+    fill = "Race"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+percentage_summary <- clinical_filtered %>%
+  count(race, follow_ups_disease_response) %>%
+  group_by(race) %>%
+  mutate(
+    percentage = (n / sum(n)) * 100,
+    label = paste0(round(percentage, 1), "%")
+  ) %>%
+  ungroup()
+
+# View the percentage table
+print(percentage_summary)
+
+ggplot(clinical_filtered, aes(x = race, fill = follow_ups_disease_response)) +
+  geom_bar(position = "fill") +  # "fill" makes it proportional
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Proportion of follow ups disease response by race",
+    x = "Race",
+    y = "Proportion",
+    fill = "follow ups disease response"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(clinical_filtered, aes(x = primary_diagnosis, fill = ethnicity)) +
+  geom_bar(position = "fill") +  # "fill" makes it proportional
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Proportion of ethnicity by primary diagnosis",
+    x = "Primary diagnosis",
+    y = "Proportion",
+    fill = "Ethnicity"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+ggplot(clinical_filtered, aes(x = ethnicity, fill = factor(vital_status))) +
+  geom_bar(position = "fill") +  # "fill" makes it proportional
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Proportion of ethnicity by vital status",
+    x = "Ethnicity",
+    y = "Proportion",
+    fill = "Vital status"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(clinical_filtered, aes(x = prior_treatment, fill = factor(vital_status))) +
+  geom_bar(position = "fill") +  # "fill" makes it proportional
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Survival proportions by Prior Treatment",
+    x = "Prior Treatment",
+    y = "Proportion",
+    fill = "Vital status"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+\newpage
+
+## Clustering : grouping genes together
+
+We want to group genes together using k-means algorithm to simplify the visualisation and also we assume that one gene is expressed accordingly with the expression of others particular genes.\
+That why we want to do k-means clustering.\
+For now our dataset presents rows as patients (samples), columns as genes and values as gene expression per patient.\
+We need to transpose our dataset : each gene should become a row and each patient should become a column.
+
+### Transposing & Scaling the dataset
+
+```{r}
+GeneX_t <- as.data.frame(t(GeneX))
+cat("Original dimensions : ", dim(GeneX), "\nTransposed dimensions : ", dim(GeneX_t))
+GeneX_t_scaled <- as.data.frame(scale(GeneX_t))
+```
+
+We want to apply **k-means clustering** to the **transposed and scaled GeneX dataset** to identify groups of genes that exhibit similar behavior. Before performing the clustering, however, we must determine **the optimal number of clusters** *k* ; that is how many homogeneous gene groups can be formed without over-segmenting the data or oversimplifying it.
+
+### Partitioning around Medoids (PAM & CLARA Methods)
+
+To guide our choice of k, we rely on approaches closely related to k-means, particularly **PAM** and its more scalable extension **CLARA**.
+
+#### What is the PAM Method?
+
+PAM (Partitioning Around Medoids) is a robust clustering algorithm based on medoids, representative objects from the dataset, rather than centroids. The algorithm follows these steps:
+
+1.  For a given cluster assignment *C*, find the observation in the cluster which minimizes the total distance to other points within the cluster. For each of the *K* clusters, these will form the *K*medoids.
+2.  Given a current set of cluster centers (medoids), minimize the total error by assigning each observation to that cluster with minimum distance (i.e., re-assign each observation to the closest medoid).
+3.  Repeat (1–2) until there are no changes in cluster member assignments.
+
+Although PAM is reliable, it becomes computationally intensive with large datasets because it evaluates many possible medoid swaps.
+
+#### Why use CLARA ?
+
+**CLARA** (Clustering LARge Applications) is an extension of PAM specifically designed for large datasets like GeneX. Instead of analyzing the full dataset at once, CLARA repeatedly draws samples, applies PAM to each sample, and selects the best clustering. This drastically reduces computation time while preserving cluster quality.
+
+### Determining the Optimal Number of Clusters for k-means
+
+To select the best value of k, we combine two complementary metrics:
+
+-   **WSS** (Within-Cluster Sum of Squares) : measures cluster compactness (lower values indicate tighter clusters)
+
+-   **Average silhouette width** : measures separation between clusters (higher values indicate better defined clusters)
+
+We compute both metrics for a range of candidate k values using CLARA :
+
+```{r}
+require(cluster)
+
+k_values <- 2:6
+
+wss <- numeric(length(k_values))
+sil_width <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  clara_fit <- clara(GeneX_t_scaled, k = k_values[i])
+  
+  wss[i] <- clara_fit$objective[1] 
+  sil_width[i] <- clara_fit$silinfo$avg.width
+}
+
+par(mfrow = c(1, 2))
+
+plot(k_values, wss, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Total within-cluster dissimilarity (WSS)",
+     main = "Elbow Method (CLARA)")
+
+plot(k_values, sil_width, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Method (CLARA)")
+```
+
+#### Interpreting the results
+
+-   The **elbow method** identifies the point where adding more clusters no longer drastically reduces WSS.
+
+-   The **silhouette method** highlights the *k* at which clusters are best separated.
+
+In our case, ***k = 4*** **provides a good compromise** : The silhouette width remains relatively high and the elbow plot begins to flatten around this value.
+
+Thus, **four clusters appear to be the optimal grouping for the GeneX genes.**
+
+### Applying k-means with the optimal k
+
+```{r}
+set.seed(123)
+km_genes <- kmeans(GeneX_t_scaled, centers = 4)
+
+gene_clusters <- data.frame(
+  Gene = rownames(GeneX_t),
+  Cluster = km_genes$cluster
+)
+
+cat("Genes number in cluster 1:", sum(gene_clusters$Cluster == 1), 
+    "\nGenes number in cluster 2:", sum(gene_clusters$Cluster == 2), 
+    "\nGenes number in cluster 3:", sum(gene_clusters$Cluster == 3), 
+    "\nGenes number in cluster 4:", sum(gene_clusters$Cluster == 4))
+```
+
+```{r}
+pca <- prcomp(GeneX_t_scaled)
+
+plot_df <- data.frame(
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2],
+  Cluster = factor(km_genes$cluster)
+)
+
+library(ggplot2)
+
+ggplot(plot_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Clusters (k-means)", 
+       x = "PC1", 
+       y = "PC2")
+```
+
+```{r}
+library(factoextra)
+
+fviz_cluster(km_genes, data = GeneX_t_scaled,
+             palette = c("pink", "green", "purple", "blue"), 
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+```
+
+```{r}
+table(clinical_data$vital_status)
+```
+
+```{r}
+clinical_data$vital_status <- as.factor(clinical_data$vital_status)
+
+num_clinical_data <- clinical_data[sapply(clinical_data, is.numeric)]
+num_cols <- setdiff(names(num_clinical_data), "vital_status")  
+
+cols <- c("0" = "blue", "1" = "red")
+point_colors <- cols[clinical_data$vital_status]
+
+pairs(num_clinical_data[num_cols],
+      col = point_colors,
+      pch = 19,
+      main = "Scatterplot Matrix Colored by Target")
+```

@@ -1,0 +1,671 @@
+---
+title: "MRR Project - Genes & Breast Cancer - Introduction"
+author: "Julien EYRAUD & Alexandre GOIGNARD"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    #toc: true
+    #toc_depth: 3
+    keep_tex: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+graphics.off()
+
+#remove code parts
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Classification of Cancer outcome using Genetic and Clinical data
+
+# Introduction
+
+This project investigates the effect of genetic and clinical variables on the survival outcome of breast cancer patients. The data contains records of more than 1000 breast cancer patients from several research institutions. Clinical data contains patient-related and tumor-related information. Additionally mRNA gene expression data is available for each patient. The gene expression data has been processed to include only the top 5000 most variable genes on the transformed scale (log2(counts + 1)).
+
+We consider that the main outcome variable of interest is **vital_status**, which is defined in clinical data.
+
+## Load data
+
+```{r cars}
+load("mrr_bio.Rdata")
+
+# genetic data: n x p matrix
+dim(GeneX) # 1231 x 5000 
+str(GeneX)
+colnames(GeneX)[1:10] # first 10 names of genes
+
+# clinical data
+dim(clinical_data) # 1231 x 24
+head(clinical_data)
+colnames(clinical_data) # variables
+
+# outcome variable
+y = clinical_data$vital_status
+table(y)
+```
+
+## Exploratory data analysis: example
+
+```{r}
+# summary statistics of first 10 genes
+apply(GeneX[,1:10],2, summary)
+
+# clinical variables: gender
+unique(clinical_data$gender) # unique values
+table(clinical_data$gender) # frequency
+```
+
+```{r}
+Y_bin = ifelse(y == "Dead", 1, 0)
+table(Y_bin)
+```
+
+```{r}
+clinical_data <- as.data.frame(clinical_data)
+GeneX <- as.data.frame(GeneX)
+
+Y_bin = ifelse(clinical_data$vital_status == "Dead", 1, 0)
+table(Y_bin)
+str(GeneX)
+```
+
+\newpage
+
+### Applying k-means with the optimal k
+
+```{r}
+GeneX_t <- as.data.frame(t(GeneX))
+GeneX_t_scaled <- as.data.frame(scale(GeneX_t))
+```
+
+```{r}
+set.seed(123)
+km_genes <- kmeans(GeneX_t_scaled, centers = 4)
+
+gene_clusters <- data.frame(
+  Gene = rownames(GeneX_t),
+  Cluster = km_genes$cluster
+)
+
+cat("Genes number in cluster 1:", sum(gene_clusters$Cluster == 1), 
+    "\nGenes number in cluster 2:", sum(gene_clusters$Cluster == 2), 
+    "\nGenes number in cluster 3:", sum(gene_clusters$Cluster == 3), 
+    "\nGenes number in cluster 4:", sum(gene_clusters$Cluster == 4))
+```
+
+```{r eval=FALSE, include=FALSE}
+# PCA for visualization
+pca <- prcomp(GeneX_t_scaled)
+
+plot_df <- data.frame(
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2],
+  Cluster = factor(km_genes$cluster)
+)
+
+library(ggplot2)
+
+ggplot(plot_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Clusters (k-means)", 
+       x = "PC1", 
+       y = "PC2")
+```
+
+```{r}
+GeneX_t <- as.data.frame(t(GeneX))
+GeneX_t$GeneCluster <- km_genes$cluster
+```
+
+## Join the GeneX and Clinical_data datasets
+
+In the original dataset, the gene expression matrix **GeneX** contains the expression levels of **5000 genes** measured for **1231 patients**.\
+Using all 5000 genes as predictors in a regression model would lead to severe problems:
+
+-   
+
+-   extremely high dimensionality
+
+-   
+
+-   multicollinearity
+
+-   
+
+-   overfitting
+
+-   
+
+-   poor model interpretability
+
+-   
+
+To address this, we applied a **dimension reduction strategy based on gene clustering**.
+
+Once each gene had been assigned to a cluster, the next step was to convert the original 5000-dimensional genetic information into a much smaller set of predictors.
+
+For each patient and for each cluster, we computed:
+
+> **the average expression of all genes belonging to that cluster**
+
+This aggregation transforms the matrix:
+
+-   
+
+-   from **1231 × 5000 genes**
+
+-   
+
+-   to **1231 × 4 cluster-level features**
+
+-   
+
+The resulting features were named **C1, C2, C3, and C4**, corresponding to gene clusters 1 to 4.
+
+Let $X \in \mathbb{R}^{n \times p}$ be the gene expression matrix, where $n$ is the number of patients and $p$ is the number of genes. Let $G_k$ denote the set of genes assigned to cluster $k$, and $|G_k|$ the number of genes in cluster $k$.
+
+For each patient $i = 1, \ldots, 5000$ and each cluster $k = 1, \ldots, 4$, the aggregated cluster-level expression value is defined as:
+
+$$
+C_{ik} = \frac{1}{|G_k|} \sum_{j \in G_k} X_{ij}.
+$$
+
+Here, $C_{ik}$ represents the mean expression of all genes in cluster $k$ for patient $i$, and $X_{ij}$ denotes the expression of gene $j$ for patient $i$.
+
+This step drastically reduces dimensionality while preserving the major expression patterns captured by the clustering.
+
+The 4 aggregated gene-cluster features (C1–C4) were then merged with the clinical dataset using patient identifiers (row names).\
+The merged dataset now contains:
+
+-   clinical predictors
+
+-   survival outcome (0/1)
+
+-   4 cluster-level genetic features
+
+This compact set of predictors is suitable for regression models (e.g., logistic regression).
+
+```{r}
+# GeneX is 1231 x 5000 (patients x genes)
+# gene_clusters is a vector length 5000 with values 1,2,3,4
+
+# Put cluster labels on columns of GeneX
+cluster_assign <- km_genes$cluster
+names(cluster_assign) <- colnames(GeneX)
+
+# Split genes by cluster
+cluster_groups <- split(names(cluster_assign), cluster_assign)
+
+# Aggregate: average expression by cluster
+GeneX_cluster_mean <- sapply(cluster_groups, function(g) {
+  rowMeans(GeneX[, g, drop = FALSE])
+})
+
+# Convert to data.frame
+GeneX_cluster_mean <- as.data.frame(GeneX_cluster_mean)
+
+colnames(GeneX_cluster_mean) <- paste0("mean_C", colnames(GeneX_cluster_mean))
+
+head(GeneX_cluster_mean)
+```
+
+```{r}
+clinical_data$patient_id <- rownames(clinical_data)
+GeneX_cluster_mean$patient_id <- rownames(GeneX_cluster_mean)
+GeneX$patient_id <- rownames(GeneX)
+
+df <- merge(clinical_data, GeneX_cluster_mean, by = "patient_id")
+complete_df <- merge(clinical_data, GeneX, by = "patient_id")
+
+head(df)
+head(complete_df)
+```
+
+## Methodology : k-means + regression
+
+```{r}
+table(df$gender)
+```
+
+```{r}
+# Function to clean dataset (hypothesis : the format is the same as before)
+clean_dataset <- function(df) {
+
+  # 1. Suppression des lignes masculines et de la colonne gender
+  df <- subset(df, gender != "male")
+
+  # 2. Création et encodage des variables binaires (0/1)
+  df$is_dead <- ifelse(df$vital_status == "Dead", 1, 0)
+  df$had_prior_treatment <- ifelse(df$prior_treatment == "Yes", 1, 0)
+  df$diagnosis_is_primary_disease <- ifelse(df$diagnosis_is_primary_disease == "TRUE", 1, 0)
+
+  # 3. Traitement spécifique de la colonne sites_of_involvement
+  df$sites_of_involvement <- sapply(df$sites_of_involvement, function(x) {
+    if (is.null(x)) return(NA)      # handle NULLs
+    paste(x, collapse = "; ")       # combine multiple strings per row
+  })
+
+  # 4. Conversion des colonnes en facteurs
+  cols_to_factor <- c(
+    "tissue_type",
+    "laterality",
+    "tissue_or_organ_of_origin",
+    "primary_diagnosis",
+    "ajcc_pathologic_t",
+    "morphology",
+    "classification_of_tumor",
+    "ethnicity",
+    "follow_ups_disease_response",
+    "race",
+    "sites_of_involvement"
+  )
+  
+  df[cols_to_factor] <- lapply(df[cols_to_factor], factor)
+  
+  # 5. Suppression des colonnes 
+  
+  cols_to_remove <- c(
+    "gender", #bc all female
+    "disease_type", #bc all patients have the same disease_type
+    "vital_status", #bc it has been replaced by is_dead
+    "prior_treatment",#bc it is now binaery had_prior_tratment
+    "patient_id", #bc we don't need it anymore (already joined datasets)
+    "primary_site", 
+    "age_is_obfuscated", #useless var
+    "days_to_birth", #bc gives NA as coeffs
+    "diagnosis_is_primary_disease", #bc gives NA as coeffs
+    "classification_of_tumor", #bc gives NA as coeffs
+    "bcr_patient_barcode" #useless var
+  )
+
+  cols_to_keep <- setdiff(names(df), cols_to_remove)
+  
+  df <- df[, cols_to_keep]
+}
+```
+
+```{r}
+df <- clean_dataset(df)
+complete_df <- clean_dataset(complete_df)
+```
+
+```{r include=FALSE}
+require(dplyr)
+convert_factors_to_integers <- function(df) {
+  # 1. Identifier toutes les colonnes de type 'factor'
+  factor_cols <- sapply(df, is.factor)
+  
+  # 2. Appliquer la conversion 'as.integer' (code de niveau)
+  # uniquement aux colonnes qui sont des facteurs
+  df[factor_cols] <- lapply(df[factor_cols], as.integer)
+  
+  return(df)
+}
+```
+
+```{r}
+df <- convert_factors_to_integers(df)
+complete_df <- convert_factors_to_integers(complete_df)
+
+df <- na.omit(df)
+complete_df <- na.omit(complete_df)
+
+head(df)
+head(complete_df)
+
+```
+
+## Reduce genes high dimensions
+
+```{r}
+GeneX <- subset(GeneX, select=-patient_id)
+```
+
+### Using PAM50 classification (like the study)
+
+```{r}
+require(genefu)
+require(dplyr)
+require(pheatmap)
+
+data(pam50)
+data(pam50.robust)
+
+resultat_pam50 <- molecular.subtyping(
+  sbt.model = "pam50",
+  data = GeneX,
+  annot = NULL, 
+  do.mapping = FALSE 
+)
+
+pam50_df <- as.data.frame(resultat_pam50)
+
+GeneX$subtype <- pam50_df$subtype
+
+head(GeneX$subtype)
+```
+
+```{r}
+
+```
+
+### Using PCA
+
+```{r}
+pca_results <- prcomp(GeneX, scale = TRUE)
+```
+
+```{r}
+# Variance des composantes
+pca_variance <- pca_results$sdev^2 
+
+# Proportion de Variance Expliquée (PVE) par chaque composante
+pve <- pca_variance / sum(pca_variance) 
+
+# Variance cumulée expliquée
+cumulative_pve <- cumsum(pve)
+
+# Afficher les 20 premières pour voir l'évolution
+head(cumulative_pve, 20)
+```
+
+```{r}
+find_optimal_k_from_pca <- function(pca_results, variance_threshold = 0.90) {
+  
+  # --- 1. Calcul de la Variance Expliquée (PVE) ---
+  
+  # pca_results$sdev contient l'écart-type des composantes. La variance est sdev^2.
+  pca_variance <- pca_results$sdev^2 
+  
+  # Proportion de Variance Expliquée (PVE) par chaque composante
+  pve <- pca_variance / sum(pca_variance) 
+  
+  # Variance cumulée expliquée
+  cumulative_pve <- cumsum(pve)
+  
+  
+  # --- 2. Détermination de K par seuil de variance ---
+  
+  # Trouver le premier K tel que la variance cumulée dépasse le seuil
+  K_optimal <- which(cumulative_pve >= variance_threshold)[1]
+  
+  
+  # --- 3. Affichage des Résultats ---
+  
+  cat(paste0("--- Analyse de la Variance Expliquée (Seuil : ", variance_threshold * 100, "%) ---\n"))
+  
+  # Créer un tableau récapitulatif pour les K optimales et quelques suivantes
+  display_limit <- min(K_optimal + 5, length(pve))
+  
+  summary_df <- data.frame(
+    Composante = 1:display_limit,
+    PVE = round(pve[1:display_limit], 4),
+    PVE_Cumulée = round(cumulative_pve[1:display_limit], 4)
+  )
+  print(summary_df)
+  
+  cat(paste("\nRésultat basé sur le seuil :\n"))
+  cat(paste("Le nombre optimal de composantes à conserver (K) est :", K_optimal, "\n"))
+  cat(paste("Ces", K_optimal, "composantes expliquent", round(cumulative_pve[K_optimal] * 100, 2), "% de la variance totale.\n"))
+  
+  
+  # --- 4. Diagramme d'Éboulis (Scree Plot) ---
+  
+  # Le graphique permet d'identifier visuellement le "coude" (elbow)
+  plot(cumulative_pve, 
+       xlab = "Composante Principale (PC)",
+       ylab = "Proportion de Variance Cumulée Expliquée",
+       type = "b",
+       main = paste0("Diagramme d'Éboulis (K pour ", variance_threshold * 100, "% de la variance)"))
+  
+  # Ajouter des lignes de référence
+  abline(v = K_optimal, col = "red", lty = 2) 
+  abline(h = variance_threshold, col = "blue", lty = 2) 
+  
+  
+  return(list(
+    K_optimal = K_optimal,
+    cumulative_pve = cumulative_pve
+  ))
+}
+```
+
+```{r}
+treshold = 0.8
+# Trouver le K qui explique 95% de la variance
+K_output <- find_optimal_k_from_pca(pca_results, treshold)
+
+# Vous pouvez ensuite utiliser K_output$K_optimal pour la modélisation LASSO
+K_to_use <- K_output$K_optimal
+
+cat("K :", K_to_use, "explains", treshold*100, "% of variance")
+```
+
+```{r}
+K <- 272 
+gene_features_reduced <- as.data.frame(pca_results$x[, 1:K])
+
+# Renommer les colonnes (PC1, PC2, ...)
+colnames(gene_features_reduced) <- paste0("PC", 1:K)
+
+# Vérifier la nouvelle dimension (Nombre de Patients x K)
+dim(gene_features_reduced)
+```
+
+```{r}
+data_finale <- cbind(clinical_data, gene_features_reduced)
+
+# La modélisation est maintenant basée sur (19 variables cliniques + K Composantes)
+dim(data_finale)
+data_finale <- clean_dataset(data_finale)
+data_finale <- convert_factors_to_integers(data_finale)
+```
+
+```{r}
+# full reg can't converge with K = 530 : it is too much components !
+# even with K=272 (explains 80% of variance) !
+full_reg_pca <- glm(is_dead ~ ., family = "binomial", data = data_finale)
+```
+
+```{r}
+full_reg <- glm(is_dead~., data=df, family="binomial")
+summary(full_reg)
+```
+
+```{r}
+st_aic_reg = step(full_reg, direction="both")
+cat("\n\n AIC is BIC here !\n\n")
+st_bic_reg = step(full_reg, direction="both", k=log(nrow(df)))
+```
+
+```{r}
+library(glmnet)
+
+scaled_df <- as.data.frame(scale(df))
+x = model.matrix(is_dead ~ ., data=scaled_df)[, -1]
+y = scaled_df$is_dead
+```
+
+```{r}
+ridge_reg <- glmnet(x, y, alpha=0, family="binomial")
+```
+
+```{r}
+ridge_cv_model <- cv.glmnet(x, y, alpha = 0, n_folds=10, family="binomial")
+ridge_min_lambda <- ridge_cv_model$lambda.min
+ridge_1se_lambda <- ridge_cv_model$lambda.1se
+cat("Lambda that minimizes RSE : ", ridge_min_lambda, "\nLambda 1SE : ", ridge_1se_lambda)
+```
+
+```{r}
+plot(ridge_cv_model)
+```
+
+```{r}
+plot(ridge_cv_model$glmnet.fit, xvar = "lambda", label = TRUE)
+abline(v = log(ridge_min_lambda), col = "red", lty = 2)
+abline(v = log(ridge_1se_lambda), col = "blue", lty = 2)
+legend("topright",
+       legend = c("lambda.min", "lambda.1se"),
+       col = c("red", "blue"),
+       lty = 2,
+       bty = "n")
+```
+
+```{r}
+ridge_min <- glmnet(x, y, alpha = 0, lambda = ridge_min_lambda, family="binomial")
+ridge_1se <- glmnet(x, y, alpha = 0, lambda = ridge_1se_lambda, family="binomial")
+```
+
+```{r}
+lasso_reg <- glmnet(x, y, alpha = 1, family="binomial")
+```
+
+```{r}
+lasso_cv_model <- cv.glmnet(x, y, alpha = 1, n_folds=10, family="binomial")
+lasso_min_lambda <- lasso_cv_model$lambda.min
+lasso_1se_lambda <- lasso_cv_model$lambda.1se
+cat("Lambda that minimizes RSE : ", lasso_min_lambda, "\nLambda 1SE : ", lasso_1se_lambda)
+```
+
+```{r}
+plot(lasso_cv_model)
+```
+
+```{r}
+# lasso_min does not converge !
+lasso_min <- glmnet(x, y, alpha = 1, lambda = lasso_min_lambda, family="binomial")
+lasso_1se <- glmnet(x, y, alpha = 1, lambda = lasso_1se_lambda, family="binomial")
+```
+
+```{r}
+get_performances <- function(cm) {
+  if (!all(dim(cm) == c(2, 2))) {
+    stop("Confusion matrix must be 2x2.")
+  }
+  
+  # Extract values (assuming [Predicted, Actual])
+  TN <- cm[1, 1]
+  FP <- cm[2, 1]
+  FN <- cm[1, 2]
+  TP <- cm[2, 2]
+  
+  # Compute metrics
+  accuracy <- (TP + TN) / sum(cm)
+  precision <- TP / (TP + FP)
+  recall <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  F <- 2 * (precision * recall) / (precision + recall)
+  
+  return(list(
+    accuracy = round(accuracy, 4),
+    precision = round(precision, 4),
+    recall = round(recall, 4),
+    specificity = round(specificity, 4),
+    F_score = round(F, 4)
+  ))
+}
+```
+
+```{r}
+k_fold_cv_glmnet <- function(data, y_col, k, alpha, lambda) {
+  fold_indices <- sample(rep(1:k, length.out = nrow(data)))
+  
+  performances <- vector("list", k)
+  
+  for (i in 1:k) {
+    test_indices <- which(fold_indices == i)
+    train_data <- data[-test_indices, ]
+    test_data  <- data[test_indices, ]
+    
+    x_train <- as.matrix(train_data[, !names(train_data) %in% y_col])
+    y_train <- train_data[[y_col]]
+    x_test  <- as.matrix(test_data[, !names(test_data) %in% y_col])
+    y_test  <- test_data[[y_col]]
+    
+    model <- glmnet(x_train, y_train, alpha = alpha, lambda = lambda, 
+                    family = "binomial")
+    
+    preds <- predict(model, newx = x_test, type = "response", s = lambda)
+    pred_classes <- ifelse(preds > 0.5, 1, 0)
+    
+    cm <- table(Predicted = pred_classes, Actual = y_test)
+    
+    performances[[i]] <- get_performances(cm)
+    
+  }
+  
+  return(performances)
+  
+}
+```
+
+```{r}
+k_fold_cv_glm <- function(data, y_col, k, model) {
+  
+  fold_indices <- sample(rep(1:k, length.out = nrow(data)))
+  
+  performances <- vector("list", k)
+  
+  model_formula <- formula(model)
+  
+  for (i in 1:k) {
+    test_indices <- which(fold_indices == i)
+    train_data <- data[-test_indices, ]
+    test_data  <- data[test_indices, ]
+    
+    model <- glm(model_formula, data = train_data, family = "binomial")
+    
+    preds <- predict(model, newdata = test_data, type = "response")
+    pred_classes <- ifelse(preds > 0.5, 1, 0)
+    
+    y_test <- test_data[[y_col]]
+    
+    cm <- table(Predicted = pred_classes, Actual = y_test)
+    
+    performances[[i]] <- get_performances(cm)
+    
+  }
+  
+  return(performances)
+  
+}
+```
+
+```{r}
+full_performances <- k_fold_cv_glm(df, "is_dead", 10, model = full_reg)
+
+st_aic_performances <- k_fold_cv_glm(df, "is_dead", 10, model = st_aic_reg) 
+
+st_bic_performances <- k_fold_cv_glm(df, "is_dead", 10, model = st_bic_reg)
+
+ridge_min_performances <- k_fold_cv_glmnet(df, "is_dead", 10, 
+                                          alpha = 0, lambda = ridge_min_lambda)
+
+ridge_1se_performances <- k_fold_cv_glmnet(df, "is_dead", 10, 
+                                          alpha = 0, lambda = ridge_1se_lambda)
+
+#lasso_min_performances <- k_fold_cv_glmnet(df, "is_dead", 10, alpha = 1, lambda = lasso_min_lambda)
+
+#lasso_1se_performances <- k_fold_cv_glmnet(df, "is_dead", 10, alpha = 1, lambda = lasso_1se_lambda)
+```
+
+```{r}
+accuracies_list <- list(
+  Full = sapply(full_performances, function(x) x$accuracy),
+  St_AIC = sapply(st_aic_performances, function(x) x$accuracy),
+  St_BIC = sapply(st_bic_performances, function(x) x$accuracy),
+  Ridge_min = sapply(ridge_min_performances, function(x) x$accuracy),
+  Ridge_1se = sapply(ridge_1se_performances, function(x) x$accuracy)
+)
+
+boxplot(accuracies_list, 
+        xlab="ModelType",
+        ylab="Accuracy",
+        col = c("lightblue", "lightgreen", "lightcoral", "lightgrey", 
+                "purple", "orange", "pink"),
+        names= c("Full","St_AIC","St_BIC","Ridge_min","Ridge_1se"))
+```
