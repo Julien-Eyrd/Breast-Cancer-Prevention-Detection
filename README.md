@@ -15,8 +15,6 @@ This repository contains an end-to-end data science and bioinformatics project f
 * [Model Architecture](#-model-architecture)
 * [Key Results & Performance Summary](#-key-results--performance-summary)
 * [Key Insights](#-key-insights)
-* [Project Structure](#-project-structure)
-* [Authors & Acknowledgments](#-authors--acknowledgments)
 
 ---
 
